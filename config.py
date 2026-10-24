@@ -28,6 +28,10 @@ class Config:
     cma_hmac_key_id: str = ""
     cma_hmac_secret: str = ""
     cma_timeout_seconds: float = 8
+    frigate_proxy_url: str = ""
+    frigate_api_key: str = ""
+    evidence_token: str = ""
+    evidence_service: str = ""
 
     @classmethod
     def from_env(cls):
@@ -58,6 +62,10 @@ class Config:
             cma_hmac_key_id=os.environ.get("CMA_HMAC_KEY_ID", "").strip(),
             cma_hmac_secret=secret("CMA_HMAC_SECRET"),
             cma_timeout_seconds=float(os.environ.get("CMA_TIMEOUT_SECONDS", "8")),
+            frigate_proxy_url=os.environ.get("FRIGATE_PROXY_URL", "").strip(),
+            frigate_api_key=secret("FRIGATE_API_KEY"),
+            evidence_token=secret("EVIDENCE_TOKEN"),
+            evidence_service=os.environ.get("EVIDENCE_SERVICE", "").strip(),
         )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")
@@ -73,4 +81,9 @@ class Config:
             raise ValueError("CMA_HMAC_KEY_ID and CMA_HMAC_SECRET are required when CMA_EVENT_URL is set")
         if not 0.5 <= config.cma_timeout_seconds <= 30:
             raise ValueError("CMA_TIMEOUT_SECONDS must be between 0.5 and 30")
+        if config.frigate_proxy_url:
+            if not config.frigate_api_key or len(config.evidence_token) < 32 or not config.evidence_service:
+                raise ValueError("Evidence requires FRIGATE_API_KEY, EVIDENCE_TOKEN and EVIDENCE_SERVICE")
+            if config.evidence_token in {config.api_token, config.provider_token, config.relay_token}:
+                raise ValueError("Use a separate evidence token")
         return config

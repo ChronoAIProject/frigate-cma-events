@@ -2,9 +2,10 @@
 
 A small deterministic consumer for Frigate review events. It persists event
 receipts, merges adjacent activity, and emits bounded **candidate metadata**.
-It performs no model inference, downloads no images, executes no commands and
-does not send chat messages. A separate CMA channel receives only finalized
-candidates; NyxBot owns the bounded image review and sheet write.
+It performs no model inference, executes no commands and sends no chat messages.
+An optional bounded evidence adapter reads historical frames for finalized
+candidates. A separate CMA channel receives candidate metadata; its worker owns
+the image review and sheet write.
 
 ```text
 Frigate MQTT reviews → JSON relay → durable aggregation → bounded candidate
@@ -28,7 +29,7 @@ from the deterministic provider and carries no images.
 - Refuse finalization without a fresh healthy, resynchronized bridge heartbeat.
 - Enforce a cooldown and daily candidate cap. Candidates have no images; their
   downstream budget declares one model turn and one comparison image with at most
-  three source frames. **No downstream call is made by this service.**
+  three source frames. Configured candidate delivery uses a signed CMA outbox.
 
 Review intervals and cumulative zones are activity hints, not continuous seat
 occupancy or proof that a meal happened. Dishes being removed does not prove their
@@ -69,6 +70,34 @@ Optional settings:
 | `CMA_EVENT_URL` | CMA custom event URL; empty disables downstream delivery |
 | `CMA_HMAC_KEY_ID` | HMAC key id configured on the CMA channel |
 | `CMA_TIMEOUT_SECONDS` | `8`; bounded request timeout |
+| `FRIGATE_PROXY_URL` | Exact HTTPS NyxID proxy URL for the owner's Frigate service; empty disables evidence |
+| `EVIDENCE_SERVICE` | Owner's NyxID service slug for this app; supplied to the worker in candidate metadata |
+
+The optional evidence adapter requires two separate deployment secrets:
+`FRIGATE_API_KEY`, scoped only to Frigate and its exact node, and `EVIDENCE_TOKEN`,
+used by a separate cloud HTTP service credential. CMA's managed worker key needs
+only that HTTP service and Sheets, with no direct HA node grant. Rotate the
+Frigate key before its NyxID expiry. No images or credentials belong in Git.
+
+`GET /evidence/{meal_id}` requires `EVIDENCE_TOKEN`. It resolves only stored
+finalized candidates (or explicit integration validations), uses their fixed
+camera/timestamps, and returns JSON containing one base64 JPEG composite and
+frame timestamps. Clients should save/decode locally and view the single image;
+never print base64 into a model transcript. At most three historical frames are
+used; missing recordings never fall back to current images. A small in-memory
+cache avoids repeated downloads; source media is not persisted by this service.
+With the adapter enabled, REST review repair is required before finalization,
+independently of any relay `resynced` assertion. A failed or truncated repair
+pauses decisions.
+
+`POST /results/{meal_id}` with the evidence token records the worker's structured
+`status`, `sheet_range` and `uncertainty` after write/readback. This is the
+worker's report, not an independent Sheet check. Operators can read it via
+`GET /api/results/{meal_id}`. `POST /api/validation` with `API_TOKEN` queues an
+explicit synthetic `integration_test` candidate in a separate table; it does
+not insert fake reviews or consume the real dining daily cap. Exclude test rows
+from meal summaries. Admission delivery alone does not prove model completion
+or a Sheet write.
 
 When `CMA_EVENT_URL` is set, mount `CMA_HMAC_SECRET` (or set
 `CMA_HMAC_SECRET_FILE`) as a deployment secret. The service signs each

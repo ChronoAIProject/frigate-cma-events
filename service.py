@@ -1,4 +1,4 @@
-"""An isolated, deterministic CMA L1 provider. No model or image processing."""
+"""Deterministic aggregation and bounded evidence; no model inference."""
 
 import asyncio
 import base64
@@ -21,6 +21,7 @@ from pymongo.errors import PyMongoError
 
 from aggregation import Aggregator, Rules
 from config import Config
+from evidence import EvidenceUnavailable, FrigateEvidence
 
 
 def canonical(value):
@@ -79,6 +80,9 @@ class State:
         self.config = config
         self.lock = threading.RLock()
         self.engines = {}
+        self.evidence = (FrigateEvidence(config.frigate_proxy_url, config.frigate_api_key, config.rules.camera)
+                         if config.frigate_proxy_url else None)
+        self.evidence_cache = {}
         self.snapshots = None
         if config.mongo_uri:
             try:
@@ -124,6 +128,8 @@ class State:
                 attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL,
                 delivered_at REAL, last_status INTEGER, last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS validations (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS analysis_results (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         """)
         old = self.get_meta(engine, "rules_digest")
         if old is not None and old != digest(asdict(self.config.rules)):
@@ -252,7 +258,40 @@ class State:
 
     def ingest_relay(self, event):
         engine = self._relay_engine()
-        return self._ingest(engine, event, time.time())
+        with engine.db:
+            result = self._ingest(engine, event, time.time())
+        self.persist(engine)
+        return result
+
+    def candidate(self, meal_id):
+        check_id(meal_id)
+        engine = self._relay_engine()
+        row = engine.db.execute("SELECT payload FROM decisions WHERE id=? AND reason='candidate'", (meal_id,)).fetchone()
+        if row is None:
+            row = engine.db.execute("SELECT payload FROM validations WHERE id=?", (meal_id,)).fetchone()
+        if row is None:
+            raise Problem(404, "candidate_not_found")
+        return json.loads(row[0])
+
+    def reconcile(self, engine, now):
+        """REST repair precedes finalization; broker connectivity is insufficient."""
+        cfg = self.config.rules
+        try:
+            after = now - cfg.maximum_seconds - cfg.merge_seconds - cfg.delivery_grace_seconds
+            rows = self.evidence.reviews(after)
+            from aggregation import wrap_review
+            with engine.db:
+                for row in rows:
+                    old = engine.db.execute("SELECT start,end,data FROM reviews WHERE id=?", (row["id"],)).fetchone()
+                    normalized = {k: row.get(k) for k in ("id", "camera", "severity", "data")}
+                    if old and old["start"] == row["start_time"] and old["end"] == row.get("end_time") and json.loads(old["data"]) == normalized:
+                        continue
+                    phase = "end" if row.get("end_time") is not None else "update"
+                    engine.ingest(wrap_review({"type": phase, "before": row, "after": row}, self.config.event_source), now)
+            self.persist(engine)
+            return True
+        except (EvidenceUnavailable, ValueError, KeyError, TypeError):
+            return False
 
     def admit(self, body, key):
         if not key or len(key) > 256 or not key.isascii() or not key.isprintable():
@@ -310,6 +349,11 @@ class State:
             "datacontenttype": "application/json",
             "data": payload,
         }
+        if self.config.evidence_service:
+            event["data"] = {**payload, "evidence": {
+                "service": self.config.evidence_service, "path": "evidence/" + meal_id,
+                "result_path": "results/" + meal_id,
+                "instructions": "Fetch this JSON once through NyxID into a local file; decode image_base64 to a JPEG and view it once. Do not print base64. Use only this bounded historical composite, never raw Frigate or live images. Write/read back the configured Sheets row, deduplicated by meal_id; then POST a JSON result with status, sheet_range and uncertainty to result_path using the same service. integration_test is excluded from meals. If evidence is unavailable, report pending rather than inventing observations."}}
         with engine.db:
             engine.db.execute(
                 "INSERT OR IGNORE INTO cma_deliveries(event_id,body,created_at,next_attempt_at) VALUES(?,?,?,?)",
@@ -349,6 +393,7 @@ class State:
                 method="POST",
                 headers={
                     "Content-Type": "application/cloudevents+json",
+                    "User-Agent": "frigate-cma-events/0.2",
                     "webhook-id": webhook_id,
                     "webhook-timestamp": timestamp,
                     "webhook-signature": cma_signature(self.config.cma_hmac_secret, webhook_id, timestamp, row["body"]),
@@ -397,6 +442,10 @@ class State:
                     delivery_engines.append((binding, engine))
                 heartbeat = self.get_meta(engine, "heartbeat", {})
                 healthy = heartbeat.get("healthy") and heartbeat.get("resynced") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
+                if binding == "__relay_ingest__" and self.evidence:
+                    connected = heartbeat.get("healthy") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
+                    # A successful REST check replaces the relay's unverified resynced assertion.
+                    healthy = bool(connected and self.reconcile(engine, now))
                 decisions = engine.flush(now, source_healthy=bool(healthy))
                 count += len(decisions)
                 if decisions:
@@ -424,7 +473,7 @@ def create_app(config=None):
         async def timer():
             while True:
                 await asyncio.sleep(cfg.tick_seconds)
-                app.state.worker.flush()
+                await asyncio.to_thread(app.state.worker.flush)
 
         task = asyncio.create_task(timer())
         try:
@@ -491,10 +540,73 @@ def create_app(config=None):
             result = state.ingest_relay(value)
         return {"accepted": result, "event_id": value.get("id")}
 
+    def evidence_authorize(request):
+        state = request.app.state.worker
+        if not state.evidence or not state.config.evidence_token:
+            raise Problem(503, "evidence_disabled")
+        if not hmac.compare_digest(request.headers.get("authorization", "").encode(),
+                                   ("Bearer " + state.config.evidence_token).encode()):
+            raise Problem(401, "not_authenticated")
+        return state
+
+    @app.get("/evidence/{meal_id}")
+    def evidence(meal_id: str, request: Request):
+        state = evidence_authorize(request)
+        with state.lock:
+            candidate = state.candidate(meal_id)
+            # Only one fixed composite per candidate; small, volatile cache, no media on disk.
+            if meal_id in state.evidence_cache:
+                return state.evidence_cache[meal_id]
+            try:
+                result = state.evidence.composite(candidate)
+            except EvidenceUnavailable as exc:
+                raise Problem(424, str(exc)) from None
+            while len(state.evidence_cache) >= 4:
+                state.evidence_cache.pop(next(iter(state.evidence_cache)))
+            state.evidence_cache[meal_id] = result
+            return result
+
+    @app.post("/results/{meal_id}")
+    async def analysis_result(meal_id: str, request: Request):
+        state = evidence_authorize(request)
+        value = await body(request)
+        if set(value) - {"status", "sheet_range", "uncertainty"} or value.get("status") not in {"recorded", "integration_test", "pending"}:
+            raise Problem(400, "invalid_result")
+        if any(not isinstance(v, str) or len(v) > 2000 for v in value.values()):
+            raise Problem(400, "invalid_result")
+        with state.lock:
+            candidate = state.candidate(meal_id)
+            if candidate.get("test") and value["status"] == "recorded":
+                raise Problem(400, "test_is_not_a_meal")
+            engine = state._relay_engine()
+            with engine.db:
+                engine.db.execute("INSERT OR REPLACE INTO analysis_results VALUES(?,?)", (meal_id, canonical(value)))
+            state.persist(engine)
+        return {"meal_id": meal_id, "accepted": True}
+
+    @app.post("/api/validation")
+    def validation(request: Request):
+        state = authorize(request, operator=True)
+        if not state.evidence:
+            raise Problem(503, "evidence_disabled")
+        with state.lock:
+            engine = state._relay_engine()
+            # Separate table, explicit synthetic ID; never enters real review aggregation.
+            meal_id, now = "integration_test_" + uuid.uuid4().hex, time.time() - 20
+            candidate = {"meal_id": meal_id, "camera": state.config.rules.camera, "decision": "candidate",
+                         "started_at": now - 1, "ended_at": now, "test": True,
+                         "validation_mode": "integration_test", "review_ids": [],
+                         "evidence_budget": {"max_model_turns": 1, "max_images": 1, "max_source_frames": 1}}
+            with engine.db:
+                engine.db.execute("INSERT INTO validations VALUES(?,?)", (meal_id, canonical(candidate)))
+                state._queue_cma_candidate(engine, candidate, time.time())
+            state.persist(engine)
+        return {"meal_id": meal_id, "test": True}
+
     @app.get("/.well-known/agent-card.json")
     def card():
         return {"name": app.state.worker.config.worker_name, "capabilities": {"streaming": True},
-                "description": "CMA L1 deterministic metadata aggregation; no model inference, media, shell, or tools"}
+                "description": "CMA L1 deterministic metadata aggregation and optional bounded evidence; no model inference or shell"}
 
     @app.put("/api/v1/cmaeg/bindings/{binding}")
     async def bind(binding: str, request: Request):
@@ -562,6 +674,14 @@ def create_app(config=None):
                     "decisions": sum(e.db.execute("SELECT count(*) FROM decisions").fetchone()[0] for e in state.engines.values()),
                     "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in state.engines.values()),
                     "cma_deliveries": {"pending": pending, "delivered": delivered}}
+
+    @app.get("/api/results/{meal_id}")
+    def result_read(meal_id: str, request: Request):
+        state = authorize(request, operator=True)
+        with state.lock:
+            state.candidate(meal_id)
+            row = state._relay_engine().db.execute("SELECT payload FROM analysis_results WHERE id=?", (meal_id,)).fetchone()
+            return {"meal_id": meal_id, "result": json.loads(row[0]) if row else None}
 
     @app.get("/api/bindings/{binding}/decisions")
     def decisions(binding: str, request: Request):

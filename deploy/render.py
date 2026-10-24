@@ -12,7 +12,7 @@ def render(image, service, environ):
     names = required + ("TIMEZONE", "PROVIDER_SLUG", "WORKER_NAME", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
                         "MINIMUM_SECONDS", "MAXIMUM_SECONDS", "COOLDOWN_SECONDS", "MAX_PER_DAY",
                         "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_EVENT_URL", "CMA_HMAC_KEY_ID",
-                        "CMA_TIMEOUT_SECONDS")
+                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "EVIDENCE_SERVICE")
     env = {key: environ[key] for key in names if key in environ}
     env["DATA_DIR"] = "/data"
     service_spec = {
@@ -22,6 +22,8 @@ def render(image, service, environ):
         "volumes": [{"name": "event-state", "mount_path": "/data", "type": "pvc", "size": "1Gi"}],
         "resources": {"cpu_request": "50m", "memory_request": "128Mi", "cpu_limit": "500m", "memory_limit": "256Mi"}}
     result = {"services": {service: service_spec}}
+    if environ.get("FRIGATE_PROXY_URL"):
+        service_spec["secret_keys"] += ["FRIGATE_API_KEY", "EVIDENCE_TOKEN"]
     if environ.get("PERSISTENCE_BACKEND") == "mongodb":
         result["addons"] = {"mongodb": {}}
         service_spec.pop("volumes")
