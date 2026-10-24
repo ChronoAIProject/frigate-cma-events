@@ -46,6 +46,7 @@ class ServiceTests(unittest.TestCase):
         self.client.__enter__()
         self.provider = {"Authorization": "Bearer " + self.config.provider_token}
         self.operator = {"Authorization": "Bearer " + self.config.api_token}
+        self.relay = {"Authorization": "Bearer " + self.config.api_token}
         self.bind()
 
     def tearDown(self):
@@ -69,6 +70,18 @@ class ServiceTests(unittest.TestCase):
 
     def test_card_only_advertises_l1(self):
         self.assertEqual(self.client.get("/.well-known/agent-card.json").json()["capabilities"], {"streaming": True})
+
+    def test_relay_ingest_is_authenticated_and_idempotent(self):
+        event = review_event()
+        self.assertEqual(self.client.post("/ingest", json=event).status_code, 401)
+        first = self.client.post("/ingest", json=event, headers=self.relay)
+        self.assertEqual(first.status_code, 200, first.text)
+        duplicate = self.client.post("/ingest", json=event, headers=self.relay)
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(duplicate.json(), {"accepted": "duplicate", "event_id": event["id"]})
+        self.assertEqual(self.client.post("/ingest", json=event, headers=self.provider).status_code, 401)
+        relay_engine = self.client.app.state.worker.engines["__relay_ingest__"]
+        self.assertEqual(relay_engine.db.execute("SELECT count(*) FROM receipts").fetchone()[0], 1)
 
     def test_sse_receipt_is_replayed_without_another_turn(self):
         value = turn(review_event())

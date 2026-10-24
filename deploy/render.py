@@ -16,7 +16,7 @@ def render(image, service, environ):
     env["DATA_DIR"] = "/data"
     service_spec = {
         "image": image, "port": 8080, "health_path": "/healthz", "replicas": 1,
-        "routes": ["/"], "env": env, "secret_keys": ["PROVIDER_TOKEN", "API_TOKEN"],
+        "routes": ["/"], "env": env, "secret_keys": ["PROVIDER_TOKEN", "API_TOKEN", "RELAY_TOKEN"],
         "volumes": [{"name": "event-state", "mount_path": "/data", "type": "pvc", "size": "1Gi"}],
         "resources": {"cpu_request": "50m", "memory_request": "128Mi", "cpu_limit": "500m", "memory_limit": "256Mi"}}
     result = {"services": {service: service_spec}}

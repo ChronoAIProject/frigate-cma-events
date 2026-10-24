@@ -112,6 +112,22 @@ class State:
             raise ValueError("Persisted rules differ; use a new data volume for a different ruleset")
         return engine
 
+    def _relay_engine(self):
+        binding = "__relay_ingest__"
+        engine = self.engines.get(binding)
+        if engine is not None:
+            return engine
+        path = self.config.data_dir / "relay-ingest.sqlite3"
+        engine = self._open(path)
+        with engine.db:
+            self.put_meta(engine, "binding_id", binding)
+            self.put_meta(engine, "owner", {"kind": "relay", "subject": "ingest"})
+            self.put_meta(engine, "profile_digest", "relay-ingest-v1")
+            self.put_meta(engine, "rules_digest", digest(asdict(self.config.rules)))
+        self.engines[binding] = engine
+        self.persist(engine)
+        return engine
+
     def persist(self, engine):
         if self.snapshots is None:
             return
@@ -214,6 +230,10 @@ class State:
             return engine.ingest(event, now)
         except (ValueError, KeyError, TypeError, AttributeError):
             raise Problem(400, "invalid_review_event") from None
+
+    def ingest_relay(self, event):
+        engine = self._relay_engine()
+        return self._ingest(engine, event, time.time())
 
     def admit(self, body, key):
         if not key or len(key) > 256 or not key.isascii() or not key.isprintable():
@@ -323,9 +343,10 @@ def create_app(config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    def authorize(request, operator=False):
+    def authorize(request, operator=False, relay=False):
         state = request.app.state.worker
-        token = state.config.api_token if operator else state.config.provider_token
+        token = (state.config.api_token if operator else (state.config.relay_token or state.config.api_token) if relay
+                 else state.config.provider_token)
         if not hmac.compare_digest(request.headers.get("authorization", "").encode(), ("Bearer " + token).encode()):
             raise Problem(401, "not_authenticated")
         return state
@@ -342,6 +363,14 @@ def create_app(config=None):
     @app.get("/healthz")
     def health():
         return {"status": "ok", "version": "0.1.0", "model_calls": 0}
+
+    @app.post("/ingest")
+    async def ingest(request: Request):
+        state = authorize(request, relay=True)
+        value = await body(request)
+        with state.lock:
+            result = state.ingest_relay(value)
+        return {"accepted": result, "event_id": value.get("id")}
 
     @app.get("/.well-known/agent-card.json")
     def card():

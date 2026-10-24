@@ -17,6 +17,7 @@ class Config:
     provider_token: str
     api_token: str
     event_source: str
+    relay_token: str = ""
     provider_slug: str = "frigate_rules"
     heartbeat_seconds: int = 90
     tick_seconds: float = 5
@@ -40,6 +41,7 @@ class Config:
             rules=Rules(**raw), data_dir=Path(os.environ.get("DATA_DIR", "/data")),
             provider_token=secret("PROVIDER_TOKEN"), api_token=secret("API_TOKEN"),
             event_source=os.environ["EVENT_SOURCE"],
+            relay_token=secret("RELAY_TOKEN") or secret("API_TOKEN"),
             provider_slug=os.environ.get("PROVIDER_SLUG", "frigate_rules"),
             heartbeat_seconds=int(os.environ.get("HEARTBEAT_SECONDS", "90")),
             tick_seconds=float(os.environ.get("TICK_SECONDS", "5")),
@@ -49,6 +51,8 @@ class Config:
         )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")
+        if len(config.relay_token) < 32:
+            raise ValueError("RELAY_TOKEN (or API_TOKEN fallback) must contain at least 32 characters")
         if config.provider_token == config.api_token:
             raise ValueError("Use different provider and operator tokens")
         if not 1 <= config.tick_seconds <= 60 or config.heartbeat_seconds < config.tick_seconds * 2:
