@@ -9,7 +9,7 @@ def render(image, service, environ):
     required = ("CAMERA", "SEATS_ZONE", "TABLE_ZONE", "EVENT_SOURCE")
     if any(not environ.get(key) for key in required):
         raise ValueError("Required parameters: " + ", ".join(required))
-    names = required + ("TIMEZONE", "PROVIDER_SLUG", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
+    names = required + ("TIMEZONE", "PROVIDER_SLUG", "WORKER_NAME", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
                         "MINIMUM_SECONDS", "MAXIMUM_SECONDS", "COOLDOWN_SECONDS", "MAX_PER_DAY",
                         "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_EVENT_URL", "CMA_HMAC_KEY_ID",
                         "CMA_TIMEOUT_SECONDS")

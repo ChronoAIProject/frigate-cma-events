@@ -19,6 +19,7 @@ class Config:
     event_source: str
     relay_token: str = ""
     provider_slug: str = "frigate_rules"
+    worker_name: str = "Frigate rule consumer"
     heartbeat_seconds: int = 90
     tick_seconds: float = 5
     mongo_uri: str = ""
@@ -47,6 +48,7 @@ class Config:
             event_source=os.environ["EVENT_SOURCE"],
             relay_token=secret("RELAY_TOKEN") or secret("API_TOKEN"),
             provider_slug=os.environ.get("PROVIDER_SLUG", "frigate_rules"),
+            worker_name=os.environ.get("WORKER_NAME", "Frigate rule consumer").strip(),
             heartbeat_seconds=int(os.environ.get("HEARTBEAT_SECONDS", "90")),
             tick_seconds=float(os.environ.get("TICK_SECONDS", "5")),
             mongo_uri=os.environ.get("MONGODB_URI", "").strip(),
@@ -63,6 +65,8 @@ class Config:
             raise ValueError("RELAY_TOKEN (or API_TOKEN fallback) must contain at least 32 characters")
         if config.provider_token == config.api_token:
             raise ValueError("Use different provider and operator tokens")
+        if not 1 <= len(config.worker_name) <= 128:
+            raise ValueError("WORKER_NAME must contain between 1 and 128 characters")
         if not 1 <= config.tick_seconds <= 60 or config.heartbeat_seconds < config.tick_seconds * 2:
             raise ValueError("Invalid timer configuration")
         if config.cma_event_url and (not config.cma_hmac_key_id or len(config.cma_hmac_secret) < 16):

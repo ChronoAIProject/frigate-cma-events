@@ -64,7 +64,9 @@ class ServiceTests(unittest.TestCase):
         return self.client.post("/api/v2/responses", json=value, headers={**self.provider, "Idempotency-Key": key})
 
     def test_health_is_public_and_metadata_requires_operator_auth(self):
-        self.assertEqual(self.client.get("/healthz").json()["model_calls"], 0)
+        health = self.client.get("/healthz").json()
+        self.assertEqual(health["model_calls"], 0)
+        self.assertEqual(health["worker_name"], "Frigate rule consumer")
         self.assertEqual(self.client.get("/api/status").status_code, 401)
         self.assertEqual(self.client.get("/api/status", headers=self.provider).status_code, 401)
         self.assertEqual(self.client.get("/api/status", headers=self.operator).status_code, 200)

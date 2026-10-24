@@ -480,7 +480,8 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.1.0", "model_calls": 0}
+        return {"status": "ok", "version": "0.1.0", "worker_name": app.state.worker.config.worker_name,
+                "model_calls": 0}
 
     @app.post("/ingest")
     async def ingest(request: Request):
@@ -492,7 +493,7 @@ def create_app(config=None):
 
     @app.get("/.well-known/agent-card.json")
     def card():
-        return {"name": "Frigate rule consumer", "capabilities": {"streaming": True},
+        return {"name": app.state.worker.config.worker_name, "capabilities": {"streaming": True},
                 "description": "CMA L1 deterministic metadata aggregation; no model inference, media, shell, or tools"}
 
     @app.put("/api/v1/cmaeg/bindings/{binding}")

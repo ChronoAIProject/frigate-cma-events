@@ -14,7 +14,9 @@
    optional rule/timer variables are copied when present. For downstream NyxBot
    delivery also set `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID`, and mount the matching
    `CMA_HMAC_SECRET`; the renderer copies only the URL/key-id parameters and the
-   secret name. `TARGET_ORG_ID` adds organization ownership to the spec. No
+   secret name. Set `WORKER_NAME=CookieDiningBotWorker` at deployment time if
+   this installation should use that public agent-card name; the provider slug
+   remains stable. `TARGET_ORG_ID` adds organization ownership to the spec. No
    secret values are read by the renderer.
 4. PUT the full spec to chrono-cd `api/v1/projects/PROJECT/apps/APP?org_id=ORG_ID`.
    Set the two tokens through that service's `/secrets` endpoint. The app waits

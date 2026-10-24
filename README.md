@@ -59,6 +59,7 @@ Optional settings:
 | --- | --- |
 | `DATA_DIR` | `/data` (mount a persistent volume) |
 | `PROVIDER_SLUG` | `frigate_rules` |
+| `WORKER_NAME` | `Frigate rule consumer`; public agent-card display name only |
 | `TIMEZONE` | `UTC` |
 | `MERGE_SECONDS` | `300` |
 | `DELIVERY_GRACE_SECONDS` | `60` |
