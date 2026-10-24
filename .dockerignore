@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!aggregation.py
+!config.py
+!service.py

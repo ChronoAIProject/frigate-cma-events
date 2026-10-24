@@ -1,0 +1,12 @@
+[project]
+name = "frigate-cma-events"
+version = "0.1.0"
+description = "Deterministic, persistent Frigate event aggregation and a CMA L1 consumer"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.116,<1", "uvicorn>=0.35,<1"]
+
+[dependency-groups]
+dev = ["httpx>=0.28,<1"]
+
+[tool.uv]
+package = false
