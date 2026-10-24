@@ -72,6 +72,12 @@ mix existing decisions with a different camera or rule configuration. Use a
 separate test app/volume for synthetic traffic. Storage is not automatically
 pruned in v0.1; monitor the persistent volume and archive it when retiring a test.
 
+For platforms whose PVC mounts are not writable by the non-root container, set
+the deployment renderer's `PERSISTENCE_BACKEND=mongodb`. This adds the platform's
+MongoDB add-on and stores serialized SQLite snapshots in it while keeping the
+working files ephemeral. The add-on connection is supplied through `MONGODB_URI`
+and `MONGODB_DATABASE`; no database credential belongs in source or plain env.
+
 ```sh
 uv sync --frozen
 uv run python -m unittest discover -s tests -v

@@ -14,11 +14,16 @@ def render(image, service, environ):
                         "HEARTBEAT_SECONDS", "TICK_SECONDS")
     env = {key: environ[key] for key in names if key in environ}
     env["DATA_DIR"] = "/data"
-    result = {"services": {service: {
+    service_spec = {
         "image": image, "port": 8080, "health_path": "/healthz", "replicas": 1,
         "routes": ["/"], "env": env, "secret_keys": ["PROVIDER_TOKEN", "API_TOKEN"],
         "volumes": [{"name": "event-state", "mount_path": "/data", "type": "pvc", "size": "1Gi"}],
-        "resources": {"cpu_request": "50m", "memory_request": "128Mi", "cpu_limit": "500m", "memory_limit": "256Mi"}}}}
+        "resources": {"cpu_request": "50m", "memory_request": "128Mi", "cpu_limit": "500m", "memory_limit": "256Mi"}}
+    result = {"services": {service: service_spec}}
+    if environ.get("PERSISTENCE_BACKEND") == "mongodb":
+        result["addons"] = {"mongodb": {}}
+        service_spec.pop("volumes")
+        service_spec["addon_env"] = {"mongodb": {"uri": "MONGODB_URI", "database": "MONGODB_DATABASE"}}
     if environ.get("TARGET_ORG_ID"):
         result["target_org_id"] = environ["TARGET_ORG_ID"]
     return result

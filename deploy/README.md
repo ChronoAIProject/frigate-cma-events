@@ -21,6 +21,12 @@
    `--resume` to verify persistence. Keep test settings/data separate from real
    camera settings/data.
 
+If the platform cannot make a non-root PVC writable, set
+`PERSISTENCE_BACKEND=mongodb` before rendering. The renderer then adds the
+platform MongoDB add-on and wires its URI/database fields into the service;
+the service keeps its SQLite working copy in ephemeral storage and snapshots
+it to MongoDB after each admitted mutation.
+
 The image runs as an unprivileged user. The persistent volume must therefore be
 writable by that user (for example, through the platform's pod `fsGroup` or an
 equivalent storage policy). A scratch `emptydir` can validate HTTP behavior, but

@@ -20,6 +20,8 @@ class Config:
     provider_slug: str = "frigate_rules"
     heartbeat_seconds: int = 90
     tick_seconds: float = 5
+    mongo_uri: str = ""
+    mongo_database: str = "frigate_cma_events"
 
     @classmethod
     def from_env(cls):
@@ -34,11 +36,17 @@ class Config:
             value = os.environ.get(field.name.upper())
             if value is not None:
                 raw[field.name] = value if field.name == "timezone" else int(value)
-        config = cls(Rules(**raw), Path(os.environ.get("DATA_DIR", "/data")),
-                     secret("PROVIDER_TOKEN"), secret("API_TOKEN"), os.environ["EVENT_SOURCE"],
-                     os.environ.get("PROVIDER_SLUG", "frigate_rules"),
-                     int(os.environ.get("HEARTBEAT_SECONDS", "90")),
-                     float(os.environ.get("TICK_SECONDS", "5")))
+        config = cls(
+            rules=Rules(**raw), data_dir=Path(os.environ.get("DATA_DIR", "/data")),
+            provider_token=secret("PROVIDER_TOKEN"), api_token=secret("API_TOKEN"),
+            event_source=os.environ["EVENT_SOURCE"],
+            provider_slug=os.environ.get("PROVIDER_SLUG", "frigate_rules"),
+            heartbeat_seconds=int(os.environ.get("HEARTBEAT_SECONDS", "90")),
+            tick_seconds=float(os.environ.get("TICK_SECONDS", "5")),
+            mongo_uri=os.environ.get("MONGODB_URI", "").strip(),
+            mongo_database=os.environ.get("MONGODB_DATABASE", "frigate_cma_events").strip()
+            or "frigate_cma_events",
+        )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")
         if config.provider_token == config.api_token:

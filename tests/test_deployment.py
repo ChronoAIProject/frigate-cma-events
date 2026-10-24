@@ -34,6 +34,14 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("UNRELATED_SETTING", service["env"])
         self.assertEqual(service["env"]["CAMERA"], "synthetic-camera")
 
+    def test_renderer_can_use_mongodb_addon_without_volume_or_secret_values(self):
+        env = {**self.parameters(), "PERSISTENCE_BACKEND": "mongodb"}
+        spec = render("ghcr.io/example/app:synthetic", "api", env)
+        self.assertEqual(spec["addons"], {"mongodb": {}})
+        service = spec["services"]["api"]
+        self.assertNotIn("volumes", service)
+        self.assertEqual(service["addon_env"], {"mongodb": {"uri": "MONGODB_URI", "database": "MONGODB_DATABASE"}})
+
     def test_config_loads_mounted_secrets_and_requires_distinct_tokens(self):
         with tempfile.TemporaryDirectory() as directory:
             provider = Path(directory) / "provider"

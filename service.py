@@ -13,6 +13,8 @@ import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
 
 from aggregation import Aggregator, Rules
 from config import Config
@@ -31,6 +33,27 @@ class Problem(Exception):
         self.status, self.code = status, code
 
 
+class SnapshotStore:
+    """Persist SQLite snapshots in the optional Chrono-cd Mongo add-on."""
+
+    def __init__(self, uri, database):
+        self.client = MongoClient(uri, serverSelectionTimeoutMS=5000,
+                                  connectTimeoutMS=5000, socketTimeoutMS=5000)
+        self.collection = self.client[database]["sqlite_snapshots"]
+        self.client.admin.command("ping")
+
+    def list(self):
+        return self.collection.find({}, {"_id": 1, "blob": 1})
+
+    def save(self, key, blob):
+        if len(blob) > 12 * 1024 * 1024:
+            raise ValueError("serialized state exceeds snapshot limit")
+        self.collection.replace_one({"_id": key}, {"_id": key, "blob": blob}, upsert=True)
+
+    def close(self):
+        self.client.close()
+
+
 def check_id(value):
     if not isinstance(value, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", value):
         raise Problem(400, "invalid_identifier")
@@ -42,6 +65,19 @@ class State:
         self.config = config
         self.lock = threading.RLock()
         self.engines = {}
+        self.snapshots = None
+        if config.mongo_uri:
+            try:
+                self.snapshots = SnapshotStore(config.mongo_uri, config.mongo_database)
+                config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                for snapshot in self.snapshots.list():
+                    path = config.data_dir / (snapshot["_id"] + ".sqlite3")
+                    if not path.exists():
+                        path.write_bytes(bytes(snapshot["blob"]))
+            except (OSError, PyMongoError, ValueError):
+                if self.snapshots is not None:
+                    self.snapshots.close()
+                raise
         config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         # A PVC mount may be writable through its fsGroup while refusing chmod
         # on the mount point itself. The platform owns that directory; SQLite
@@ -75,6 +111,13 @@ class State:
             engine.close()
             raise ValueError("Persisted rules differ; use a new data volume for a different ruleset")
         return engine
+
+    def persist(self, engine):
+        if self.snapshots is None:
+            return
+        binding = self.get_meta(engine, "binding_id")
+        if binding is not None:
+            self.snapshots.save(hashlib.sha256(binding.encode()).hexdigest(), engine.db.serialize())
 
     @staticmethod
     def get_meta(engine, key, default=None):
@@ -129,6 +172,7 @@ class State:
                 self.put_meta(engine, "profile_digest", body["profile_digest"])
                 self.put_meta(engine, "rules_digest", digest(asdict(self.config.rules)))
             self.engines[binding] = engine
+            self.persist(engine)
         # L1 is deliberately honest: the required model envelope is unused.
         return {"binding_id": binding, "level": "l1", "honoured": ["profile.metadata.owner"],
                 "refused": [{"field": field, "reason": "Deterministic consumer; no model, tools, or arbitrary code execution"}
@@ -148,6 +192,7 @@ class State:
                 if row is not None and not row[0]:
                     raise Problem(409, "conversation_revoked")
                 engine.db.execute("INSERT OR IGNORE INTO conversations VALUES(?,1)", (conversation,))
+        self.persist(engine)
         return {"conversation_id": conversation}
 
     def _ingest(self, engine, event, now):
@@ -206,6 +251,7 @@ class State:
             response = {"id": "resp_" + uuid.uuid4().hex, "object": "response", "status": "completed", "output": []}
             engine.db.execute("INSERT INTO turns VALUES(?,?,?,?,?,?)", (conversation, key, request_digest,
                               canonical(response), event_id, canonical(context)))
+        self.persist(engine)
         return response
 
     def flush(self):
@@ -217,12 +263,18 @@ class State:
                     continue
                 heartbeat = self.get_meta(engine, "heartbeat", {})
                 healthy = heartbeat.get("healthy") and heartbeat.get("resynced") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
-                count += len(engine.flush(now, source_healthy=bool(healthy)))
+                decisions = engine.flush(now, source_healthy=bool(healthy))
+                count += len(decisions)
+                if decisions:
+                    self.persist(engine)
             return count
 
     def close(self):
         for engine in self.engines.values():
+            self.persist(engine)
             engine.close()
+        if self.snapshots is not None:
+            self.snapshots.close()
 
 
 def create_app(config=None):
@@ -311,6 +363,7 @@ def create_app(config=None):
             with engine.db:
                 state.put_meta(engine, "revoked", True)
                 engine.db.execute("UPDATE conversations SET active=0")
+            state.persist(engine)
         return Response(status_code=204)
 
     @app.put("/api/v1/cmaeg/bindings/{binding}/conversations/{conversation}")
