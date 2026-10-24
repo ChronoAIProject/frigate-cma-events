@@ -592,10 +592,15 @@ def create_app(config=None):
         with state.lock:
             engine = state._relay_engine()
             # Separate table, explicit synthetic ID; never enters real review aggregation.
-            meal_id, now = "integration_test_" + uuid.uuid4().hex, time.time() - 20
+            try:
+                rows = [r for r in state.evidence.reviews(time.time() - 86400) if r.get("end_time") is not None]
+                review = max(rows, key=lambda r: r["end_time"])
+            except (EvidenceUnavailable, ValueError, KeyError, TypeError):
+                raise Problem(424, "validation_history_unavailable") from None
+            meal_id, now = "integration_test_" + uuid.uuid4().hex, review["end_time"]
             candidate = {"meal_id": meal_id, "camera": state.config.rules.camera, "decision": "candidate",
-                         "started_at": now - 1, "ended_at": now, "test": True,
-                         "validation_mode": "integration_test", "review_ids": [],
+                         "started_at": review["start_time"], "ended_at": now, "test": True,
+                         "validation_mode": "integration_test", "review_ids": [review["id"]],
                          "evidence_budget": {"max_model_turns": 1, "max_images": 1, "max_source_frames": 1}}
             with engine.db:
                 engine.db.execute("INSERT INTO validations VALUES(?,?)", (meal_id, canonical(candidate)))

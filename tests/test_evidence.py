@@ -32,7 +32,8 @@ class EvidenceTests(unittest.TestCase):
 
     def test_test_evidence_is_bounded_cached_and_cannot_be_reported_as_a_meal(self):
         state = self.enable()
-        response = self.client.post("/api/validation", headers=self.operator)
+        with patch.object(state.evidence, "reviews", return_value=[test_service.review_event()["data"]["after"]]):
+            response = self.client.post("/api/validation", headers=self.operator)
         self.assertEqual(response.status_code, 200, response.text)
         meal_id = response.json()["meal_id"]
         blob = BytesIO()
