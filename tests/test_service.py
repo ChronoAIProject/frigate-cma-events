@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from aggregation import Rules, wrap_review
 from config import Config
-from service import create_app, digest
+from service import State, create_app, digest
 
 
 def review_event(identity="review-one", *, end=None):
@@ -169,6 +169,52 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.post_turn(value).status_code, 400)
         response = self.client.post("/api/v2/responses", content=b"x" * 262145, headers=self.provider)
         self.assertEqual(response.status_code, 413)
+
+    def test_mongodb_snapshot_restores_binding_after_local_files_are_lost(self):
+        snapshots = {}
+
+        class Collection:
+            def find(self, *_args):
+                return list(snapshots.values())
+
+            def replace_one(self, _query, document, upsert=False):
+                if not upsert:
+                    raise AssertionError("snapshot writes must upsert")
+                snapshots[document["_id"]] = document
+
+        class Database:
+            def __getitem__(self, _name):
+                return Collection()
+
+        class Admin:
+            def command(self, _name):
+                return {"ok": 1}
+
+        class Client:
+            def __init__(self, *_args, **_kwargs):
+                self.admin = Admin()
+
+            def __getitem__(self, _name):
+                return Database()
+
+            def close(self):
+                pass
+
+        profile = binding(self.config.provider_token)["profile"]
+        body = {"schema_version": 1, "profile": profile, "profile_digest": digest(profile),
+                "agent_key": self.config.provider_token, "tools": {}}
+        with patch("service.MongoClient", Client):
+            config = replace(self.config, mongo_uri="mongodb://synthetic")
+            state = State(config)
+            state.bind("snapshot-binding", body)
+            state.close()
+            for path in Path(self.directory.name).glob("*.sqlite3*"):
+                path.unlink()
+            restored = State(config)
+            try:
+                self.assertIn("snapshot-binding", restored.engines)
+            finally:
+                restored.close()
 
 
 if __name__ == "__main__":
