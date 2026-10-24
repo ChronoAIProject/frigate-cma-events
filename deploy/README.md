@@ -21,6 +21,12 @@
    `--resume` to verify persistence. Keep test settings/data separate from real
    camera settings/data.
 
+The image runs as an unprivileged user. The persistent volume must therefore be
+writable by that user (for example, through the platform's pod `fsGroup` or an
+equivalent storage policy). A scratch `emptydir` can validate HTTP behavior, but
+it cannot satisfy the restart persistence check and must not be used for live
+event state.
+
 ## CMA provider registration
 
 The gateway operator adds this **entry** to the existing provider registry; do
