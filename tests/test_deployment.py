@@ -28,7 +28,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(spec["target_org_id"], "synthetic-org")
         service = spec["services"]["api"]
         self.assertEqual(service["replicas"], 1)
-        self.assertEqual(service["secret_keys"], ["PROVIDER_TOKEN", "API_TOKEN", "RELAY_TOKEN"])
+        self.assertEqual(service["secret_keys"], ["PROVIDER_TOKEN", "API_TOKEN", "RELAY_TOKEN", "CMA_HMAC_SECRET"])
         self.assertNotIn("PROVIDER_TOKEN", service["env"])
         self.assertNotIn("API_TOKEN", service["env"])
         self.assertNotIn("UNRELATED_SETTING", service["env"])

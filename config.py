@@ -23,6 +23,10 @@ class Config:
     tick_seconds: float = 5
     mongo_uri: str = ""
     mongo_database: str = "frigate_cma_events"
+    cma_event_url: str = ""
+    cma_hmac_key_id: str = ""
+    cma_hmac_secret: str = ""
+    cma_timeout_seconds: float = 8
 
     @classmethod
     def from_env(cls):
@@ -48,6 +52,10 @@ class Config:
             mongo_uri=os.environ.get("MONGODB_URI", "").strip(),
             mongo_database=os.environ.get("MONGODB_DATABASE", "frigate_cma_events").strip()
             or "frigate_cma_events",
+            cma_event_url=os.environ.get("CMA_EVENT_URL", "").strip(),
+            cma_hmac_key_id=os.environ.get("CMA_HMAC_KEY_ID", "").strip(),
+            cma_hmac_secret=secret("CMA_HMAC_SECRET"),
+            cma_timeout_seconds=float(os.environ.get("CMA_TIMEOUT_SECONDS", "8")),
         )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")
@@ -57,4 +65,8 @@ class Config:
             raise ValueError("Use different provider and operator tokens")
         if not 1 <= config.tick_seconds <= 60 or config.heartbeat_seconds < config.tick_seconds * 2:
             raise ValueError("Invalid timer configuration")
+        if config.cma_event_url and (not config.cma_hmac_key_id or len(config.cma_hmac_secret) < 16):
+            raise ValueError("CMA_HMAC_KEY_ID and CMA_HMAC_SECRET are required when CMA_EVENT_URL is set")
+        if not 0.5 <= config.cma_timeout_seconds <= 30:
+            raise ValueError("CMA_TIMEOUT_SECONDS must be between 0.5 and 30")
         return config

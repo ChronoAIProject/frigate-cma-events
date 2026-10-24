@@ -1,6 +1,7 @@
 """An isolated, deterministic CMA L1 provider. No model or image processing."""
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 import hashlib
@@ -9,6 +10,8 @@ import json
 import re
 import threading
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 import uuid
 
 from fastapi import FastAPI, Request
@@ -26,6 +29,17 @@ def canonical(value):
 
 def digest(value):
     return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def cma_event_id(source, meal_id):
+    """Return a stable CloudEvent id for one finalized meal candidate."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, source + "\n" + "dining.meal_end_candidate\n" + meal_id))
+
+
+def cma_signature(secret, webhook_id, webhook_timestamp, raw_body):
+    signed = webhook_id + "." + webhook_timestamp + "." + raw_body
+    value = hmac.new(secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).digest()
+    return "v1," + base64.b64encode(value).decode("ascii")
 
 
 class Problem(Exception):
@@ -104,6 +118,11 @@ class State:
                 conversation TEXT NOT NULL, key TEXT NOT NULL, request_digest TEXT NOT NULL,
                 response TEXT NOT NULL, event_id TEXT NOT NULL, context TEXT NOT NULL,
                 PRIMARY KEY (conversation,key), UNIQUE (conversation,event_id)
+            );
+            CREATE TABLE IF NOT EXISTS cma_deliveries (
+                event_id TEXT PRIMARY KEY, body TEXT NOT NULL, created_at REAL NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at REAL NOT NULL,
+                delivered_at REAL, last_status INTEGER, last_error TEXT
             );
         """)
         old = self.get_meta(engine, "rules_digest")
@@ -274,20 +293,119 @@ class State:
         self.persist(engine)
         return response
 
+    def _queue_cma_candidate(self, engine, payload, now):
+        """Durably enqueue a candidate before attempting external delivery."""
+        if not self.config.cma_event_url or payload.get("decision") != "candidate":
+            return
+        meal_id = payload.get("meal_id")
+        camera = payload.get("camera")
+        if not isinstance(meal_id, str) or not isinstance(camera, str):
+            return
+        event = {
+            "specversion": "1.0",
+            "id": cma_event_id(self.config.event_source, meal_id),
+            "source": self.config.event_source,
+            "type": "dining.meal_end_candidate",
+            "subject": camera,
+            "datacontenttype": "application/json",
+            "data": payload,
+        }
+        with engine.db:
+            engine.db.execute(
+                "INSERT OR IGNORE INTO cma_deliveries(event_id,body,created_at,next_attempt_at) VALUES(?,?,?,?)",
+                (event["id"], canonical(event), now, now),
+            )
+
+    @staticmethod
+    def _delivery_error(exc):
+        if isinstance(exc, HTTPError):
+            return exc.code, "http_error"
+        if isinstance(exc, URLError):
+            return None, "network_error"
+        return None, "delivery_error"
+
+    def _deliver_pending(self, engines):
+        """Send due candidates; retries are durable and bounded by response class."""
+        if not self.config.cma_event_url:
+            return
+        due = []
+        now = time.time()
+        with self.lock:
+            for binding, engine in engines:
+                if binding != "__relay_ingest__":
+                    continue
+                rows = engine.db.execute(
+                    "SELECT event_id,body,attempts FROM cma_deliveries "
+                    "WHERE delivered_at IS NULL AND next_attempt_at<=? ORDER BY created_at LIMIT 8", (now,)
+                ).fetchall()
+                due.extend((engine, row) for row in rows)
+        for engine, row in due:
+            webhook_id = row["event_id"]
+            timestamp = str(int(time.time()))
+            raw = row["body"].encode("utf-8")
+            request = UrlRequest(
+                self.config.cma_event_url,
+                data=raw,
+                method="POST",
+                headers={
+                    "Content-Type": "application/cloudevents+json",
+                    "webhook-id": webhook_id,
+                    "webhook-timestamp": timestamp,
+                    "webhook-signature": cma_signature(self.config.cma_hmac_secret, webhook_id, timestamp, row["body"]),
+                },
+            )
+            status, error = None, None
+            try:
+                with urlopen(request, timeout=self.config.cma_timeout_seconds) as response:
+                    status = int(response.status)
+                    response.read(1024)
+            except (HTTPError, URLError, TimeoutError, OSError) as exc:
+                status, error = self._delivery_error(exc)
+            delivered = status is not None and 200 <= status < 300
+            retry = status is None or status == 429 or status >= 500
+            with self.lock:
+                attempts = int(row["attempts"]) + 1
+                if delivered:
+                    engine.db.execute(
+                        "UPDATE cma_deliveries SET attempts=?,delivered_at=?,last_status=?,last_error=NULL WHERE event_id=?",
+                        (attempts, time.time(), status, webhook_id),
+                    )
+                elif retry:
+                    delay = min(300, max(2, 2 ** min(attempts - 1, 8)))
+                    engine.db.execute(
+                        "UPDATE cma_deliveries SET attempts=?,next_attempt_at=?,last_status=?,last_error=? WHERE event_id=?",
+                        (attempts, time.time() + delay, status, error or "retryable_http_error", webhook_id),
+                    )
+                else:
+                    # A permanent 4xx is retained for inspection but never hot-looped.
+                    engine.db.execute(
+                        "UPDATE cma_deliveries SET attempts=?,next_attempt_at=?,last_status=?,last_error=? WHERE event_id=?",
+                        (attempts, time.time() + 10**9, status, error or "permanent_http_error", webhook_id),
+                    )
+                self.persist(engine)
+
     def flush(self):
         now = time.time()
+        delivery_engines = []
         with self.lock:
             count = 0
             for engine in self.engines.values():
                 if self.get_meta(engine, "revoked", False):
                     continue
+                binding = self.get_meta(engine, "binding_id")
+                if binding == "__relay_ingest__":
+                    delivery_engines.append((binding, engine))
                 heartbeat = self.get_meta(engine, "heartbeat", {})
                 healthy = heartbeat.get("healthy") and heartbeat.get("resynced") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
                 decisions = engine.flush(now, source_healthy=bool(healthy))
                 count += len(decisions)
                 if decisions:
+                    if binding == "__relay_ingest__":
+                        for decision in decisions:
+                            self._queue_cma_candidate(engine, decision, now)
                     self.persist(engine)
-            return count
+        self._deliver_pending(delivery_engines)
+        return count
 
     def close(self):
         for engine in self.engines.values():
@@ -434,9 +552,15 @@ def create_app(config=None):
     def status(request: Request):
         state = authorize(request, operator=True)
         with state.lock:
+            pending = 0
+            delivered = 0
+            for engine in state.engines.values():
+                pending += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NULL").fetchone()[0]
+                delivered += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NOT NULL").fetchone()[0]
             return {"mode": "observe", "model_calls": 0, "bindings": len(state.engines),
                     "decisions": sum(e.db.execute("SELECT count(*) FROM decisions").fetchone()[0] for e in state.engines.values()),
-                    "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in state.engines.values())}
+                    "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in state.engines.values()),
+                    "cma_deliveries": {"pending": pending, "delivered": delivered}}
 
     @app.get("/api/bindings/{binding}/decisions")
     def decisions(binding: str, request: Request):

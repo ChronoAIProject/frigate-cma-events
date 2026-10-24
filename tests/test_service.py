@@ -7,12 +7,13 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.request import Request as UrlRequest
 
 from fastapi.testclient import TestClient
 
 from aggregation import Rules, wrap_review
 from config import Config
-from service import State, create_app, digest
+from service import State, cma_signature, create_app, digest
 
 
 def review_event(identity="review-one", *, end=None):
@@ -82,6 +83,57 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.client.post("/ingest", json=event, headers=self.provider).status_code, 401)
         relay_engine = self.client.app.state.worker.engines["__relay_ingest__"]
         self.assertEqual(relay_engine.db.execute("SELECT count(*) FROM receipts").fetchone()[0], 1)
+
+    def test_candidate_is_signed_and_delivered_once_from_durable_outbox(self):
+        config = replace(self.config, cma_event_url="https://cma.example/events",
+                         cma_hmac_key_id="dining", cma_hmac_secret="test-secret")
+        state = State(config)
+        try:
+            now = time.time()
+            heartbeat = {"specversion": "1.0", "source": config.event_source, "id": "heartbeat-cma",
+                         "type": "frigate.bridge.heartbeat", "subject": "test-camera",
+                         "data": {"healthy": True, "resynced": True}}
+            state.ingest_relay(heartbeat)
+            state.ingest_relay(review_event())
+            relay_engine = state.engines["__relay_ingest__"]
+            with relay_engine.db:
+                relay_engine.db.execute("UPDATE reviews SET received=?", (time.time() - 3,))
+
+            class Response:
+                status = 202
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def read(self, _limit):
+                    return b"accepted"
+
+            requests = []
+
+            def send(request, timeout):
+                self.assertIsInstance(request, UrlRequest)
+                requests.append((request, timeout))
+                return Response()
+
+            with patch("service.urlopen", side_effect=send):
+                self.assertEqual(state.flush(), 1)
+                self.assertEqual(state.flush(), 0)
+            self.assertEqual(len(requests), 1)
+            request, timeout = requests[0]
+            self.assertEqual(timeout, config.cma_timeout_seconds)
+            body = request.data.decode()
+            event = json.loads(body)
+            self.assertEqual(event["type"], "dining.meal_end_candidate")
+            timestamp = request.get_header("Webhook-timestamp")
+            signature = request.get_header("Webhook-signature")
+            self.assertEqual(signature, cma_signature(config.cma_hmac_secret, event["id"], timestamp, body))
+            self.assertEqual(state.engines["__relay_ingest__"].db.execute(
+                "SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NOT NULL").fetchone()[0], 1)
+        finally:
+            state.close()
 
     def test_sse_receipt_is_replayed_without_another_turn(self):
         value = turn(review_event())

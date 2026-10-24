@@ -3,20 +3,20 @@
 A small deterministic consumer for Frigate review events. It persists event
 receipts, merges adjacent activity, and emits bounded **candidate metadata**.
 It performs no model inference, downloads no images, executes no commands and
-does not send chat messages.
+does not send chat messages. A separate CMA channel receives only finalized
+candidates; NyxBot owns the bounded image review and sheet write.
 
 ```text
-Frigate MQTT reviews → JSON relay → CMA custom event channel
-  → frigate_rules provider → durable aggregation → candidate metadata
-  → a separately configured evidence selector / vision agent
+Frigate MQTT reviews → JSON relay → durable aggregation → bounded candidate
+  → CMA custom event channel → NyxBot evidence review → structured sheet row
 ```
 
 The service implements CMA's L1 binding, conversation, Responses SSE and event
 context interfaces. **Deploying it does not register a provider in CMA.** A gateway
 operator must add the deployed origin to the provider registry. The stock
 `cma_codex` and `nyxbot` providers invoke agents on every event; channel partitioning
-alone does not aggregate events. The MQTT relay and downstream image selection /
-NyxBot delivery are separate integrations and are not implemented in this release.
+alone does not aggregate events. Candidate forwarding is deliberately separate
+from the deterministic provider and carries no images.
 
 ## Behavior
 
@@ -65,6 +65,16 @@ Optional settings:
 | `MINIMUM_SECONDS`, `MAXIMUM_SECONDS` | `480`, `14400` |
 | `COOLDOWN_SECONDS`, `MAX_PER_DAY` | `3600`, `3` |
 | `HEARTBEAT_SECONDS`, `TICK_SECONDS` | `90`, `5` |
+| `CMA_EVENT_URL` | CMA custom event URL; empty disables downstream delivery |
+| `CMA_HMAC_KEY_ID` | HMAC key id configured on the CMA channel |
+| `CMA_TIMEOUT_SECONDS` | `8`; bounded request timeout |
+
+When `CMA_EVENT_URL` is set, mount `CMA_HMAC_SECRET` (or set
+`CMA_HMAC_SECRET_FILE`) as a deployment secret. The service signs each
+`dining.meal_end_candidate` CloudEvent and keeps a durable outbox. Successful
+2xx responses are marked delivered; 429 and 5xx responses retry with backoff,
+while permanent 4xx responses remain retained for operator inspection. The exact
+event body is stored before the first send.
 
 Use one process, one replica and one persistent volume. The deployment renderer
 uses those bounds. A changed ruleset requires a new volume; startup refuses to
@@ -140,7 +150,7 @@ uv run python scripts/smoke.py --base-url https://YOUR-TEST-APP.example \
 ```
 
 This exercises the deployed provider directly. A real CMA-gateway round trip
-requires provider registration and channel creation; direct HTTP tests must not
-be presented as that round trip.
+requires provider registration, channel creation and a configured CMA event URL;
+direct HTTP tests must not be presented as that round trip.
 
 Licensed under Apache-2.0.

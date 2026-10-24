@@ -11,8 +11,11 @@
    ```
 
    `CAMERA`, `SEATS_ZONE`, `TABLE_ZONE` and `EVENT_SOURCE` are required. Other
-   optional rule/timer variables are copied when present. `TARGET_ORG_ID` adds
-   organization ownership to the spec. No secret values are read by the renderer.
+   optional rule/timer variables are copied when present. For downstream NyxBot
+   delivery also set `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID`, and mount the matching
+   `CMA_HMAC_SECRET`; the renderer copies only the URL/key-id parameters and the
+   secret name. `TARGET_ORG_ID` adds organization ownership to the spec. No
+   secret values are read by the renderer.
 4. PUT the full spec to chrono-cd `api/v1/projects/PROJECT/apps/APP?org_id=ORG_ID`.
    Set the two tokens through that service's `/secrets` endpoint. The app waits
    for its declared secrets. Wait until live status reports `phase: ready` and
@@ -53,22 +56,23 @@ not replace other provider entries. Substitute the deployed HTTPS origin:
 }
 ```
 
-Then create a dedicated CMA channel, with `provider.slug: frigate_rules`, a custom
-source using HMAC, `partition.key: event_subject`, and `reply.auto_final: false`.
-The channel `credentials.agent_key` must equal this deployment's provider token.
-Use the same camera as the CloudEvent `subject` for all its events. The required
-model envelope is unused and explicitly refused by the binding response.
+Then create a dedicated CMA channel for the downstream NyxBot worker, with
+`provider.slug: nyxbot`, a custom source using HMAC, `partition.key: event_subject`,
+and a bounded system prompt. Supply the channel HMAC key id and secret to the
+deployment as `CMA_HMAC_KEY_ID` and `CMA_HMAC_SECRET`. Keep the deterministic
+provider's `frigate_rules` channel separate; it remains the L1 event consumer
+used for aggregation.
 
-The MQTT relay runs on a host with broker access. It signs events for the returned
-`custom_event_url`, persists the exact event envelope before forwarding, and
-preserves event identity when reconciling delivery. It must resynchronize review
-state after reconnecting before claiming a healthy heartbeat. Relay provisioning
-and enabling Frigate MQTT are not performed by this service.
+The MQTT relay runs on a host with broker access and forwards Frigate events to
+`/ingest`. The cloud service signs candidate events for the CMA channel, persists
+the exact event envelope before forwarding, and preserves event identity across
+retries. The relay must resynchronize review state after reconnecting before
+claiming a healthy heartbeat. Relay provisioning and enabling Frigate MQTT are
+not performed by this service.
 
-Raw events stop at the deterministic consumer. Future candidate forwarding can
-target a separate vision channel; it must honor the consumer's daily/cooldown
-limits and use authenticated, bounded visual evidence. v0.1 records candidates
-for inspection and does not forward them.
+Raw events stop at the deterministic consumer. Candidate forwarding targets a
+separate NyxBot channel and carries no images; its prompt limits Frigate
+evidence to the candidate budget and directs one structured Google Sheets row.
 
 ## Status meanings
 
