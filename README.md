@@ -1,23 +1,33 @@
 # Frigate CMA Events
 
-A small deterministic consumer for Frigate review events. It persists event
-receipts, merges adjacent activity, and emits bounded **candidate metadata**.
-It performs no model inference, executes no commands and sends no chat messages.
-An optional bounded evidence adapter reads historical frames for finalized
-candidates. A separate CMA channel receives candidate metadata; its worker owns
-the image review and sheet write.
+A deployable reference application: turn Home Assistant / Frigate activity into
+bounded dining observations, review them with a CMA worker, and record the
+results in Google Sheets. An existing NyxBot can query and summarize the records.
+
+**Start with the [complete dining example](examples/dining/README.md)** for local
+prerequisites, private configuration generation, worker/channel setup, deployment
+and tests. [examples/dining](examples/dining) contains synthetic templates; your
+camera, spreadsheet, account and credentials are supplied during installation.
+
+The service persists event receipts, merges activity and emits **candidate
+metadata**. It performs no model inference, executes no commands and sends no
+chat messages. Its optional evidence adapter reads bounded historical frames;
+the separate CMA worker performs the image analysis and verified Sheet write.
 
 ```text
-Frigate MQTT reviews → JSON relay → durable aggregation → bounded candidate
-  → CMA custom event channel → NyxBot evidence review → structured sheet row
+Frigate → HA Event Relay → durable aggregation → bounded candidate
+  → CMA custom event channel → visual worker → Google Sheets → NyxBot query
 ```
 
-The service implements CMA's L1 binding, conversation, Responses SSE and event
-context interfaces. **Deploying it does not register a provider in CMA.** A gateway
-operator must add the deployed origin to the provider registry. The stock
-`cma_codex` and `nyxbot` providers invoke agents on every event; channel partitioning
-alone does not aggregate events. Candidate forwarding is deliberately separate
-from the deterministic provider and carries no images.
+The reference application uses relay HTTP ingestion and CMA's registered
+`cma_codex` provider with an existing Agent. Channel partitioning routes events;
+aggregation happens in this service before the model is called. `dining-evidence`
+is a NyxID service entry for this same deployed app, not a separate process.
+
+The service also implements CMA's L1 binding/conversation/Responses interfaces
+for integrations that need them. Using that optional provider interface through
+the gateway requires operator registration; the reference application uses
+`/ingest` and does not require that registration.
 
 ## Behavior
 
@@ -37,9 +47,10 @@ food was eaten. The service labels its output accordingly.
 
 ## Deployment configuration
 
-All installation-specific values are supplied at deployment. There are no camera
-identifiers, network addresses, owner IDs, real event samples or credentials in
-the source or test fixtures. All tests construct synthetic data.
+All installation-specific values are supplied at deployment. Published templates
+and tests use synthetic values. Generated installation files stay outside this
+checkout; private deployment settings, real event samples and credentials do
+not belong in this repository.
 
 Required environment variables:
 
@@ -48,7 +59,7 @@ Required environment variables:
 | `CAMERA` | Exact Frigate camera name |
 | `SEATS_ZONE`, `TABLE_ZONE` | Exact configured Frigate zone names |
 | `EVENT_SOURCE` | Allowed CloudEvent source URI |
-| `PROVIDER_TOKEN` | Dedicated CMA channel agent bearer, at least 32 characters |
+| `PROVIDER_TOKEN` | This app's optional L1 provider API bearer, at least 32 characters; separate from a NyxID channel key |
 | `API_TOKEN` | Different operator API bearer, at least 32 characters |
 
 Tokens also support `_FILE` variants for mounted secrets. Never put token values
@@ -128,8 +139,9 @@ uv run uvicorn service:app --host 0.0.0.0 --port 8080 --no-access-log
 The Docker image runs as an unprivileged user. GitHub Actions tests every push
 and publishes `ghcr.io/chronoaiproject/frigate-cma-events:sha-<full-commit>`.
 
-See [deployment instructions](deploy/README.md) to render a chrono-cd spec and
-register the provider. Rendered installation files must stay outside this repo.
+See [deployment instructions](deploy/README.md) for cloud spec/secrets and the
+optional provider interface. The [dining walkthrough](examples/dining/README.md)
+covers the complete application and generated worker/channel/relay templates.
 
 ## API and authentication
 
@@ -161,9 +173,12 @@ identity is rejected. Context and aggregation admission commit together.
 
 `frigate.review.new`, `.update` and `.end` carry the MQTT review envelope in
 `data`. `wrap_review` creates stable CloudEvents from that envelope.
-`frigate.bridge.heartbeat` carries `{"healthy":true,"resynced":true}`; the relay
-must assert this only after checking broker/Frigate health and repairing any gap
-after a reconnect. Silence alone is never proof of a meal ending.
+`frigate.bridge.heartbeat` reports connection health. HA Event Relay reports
+`resynced:false` because MQTT connectivity cannot establish source history. With
+the evidence adapter enabled, this service repairs reviews through the Frigate
+REST API before finalization. A custom adapter using the standalone L1 provider
+may assert `resynced:true` only after actually repairing history. Silence alone
+is never proof of a meal ending.
 
 ## Deployed smoke tests
 
@@ -179,8 +194,9 @@ uv run python scripts/smoke.py --base-url https://YOUR-TEST-APP.example \
   --state /private/path/smoke-state.json --resume
 ```
 
-This exercises the deployed provider directly. A real CMA-gateway round trip
-requires provider registration, channel creation and a configured CMA event URL;
-direct HTTP tests must not be presented as that round trip.
+This exercises the deployed L1 provider directly and should use an isolated test
+app with evidence/CMA delivery disabled. The dining example separately documents
+an explicit integration validation through CMA, image review, Sheet write/readback
+and NyxBot query, plus a real-meal test for camera detection and trigger quality.
 
 Licensed under Apache-2.0.

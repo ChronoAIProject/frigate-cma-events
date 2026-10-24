@@ -7,3 +7,11 @@ data/
 *.sqlite3*
 *.pem
 *.key
+*.headers
+private/
+app-spec.json
+app-secrets.json
+channel-request.json
+worker-request.json
+dining-config.json
+relay-options.json

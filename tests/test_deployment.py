@@ -23,7 +23,7 @@ class DeploymentTests(unittest.TestCase):
     def test_renderer_copies_only_parameters_and_secret_names(self):
         env = {**self.parameters(), "PROVIDER_TOKEN": "synthetic-provider-secret",
                "API_TOKEN": "synthetic-api-secret", "UNRELATED_SETTING": "do-not-copy",
-               "TARGET_ORG_ID": "synthetic-org", "WORKER_NAME": "CookieDiningBotWorker"}
+               "TARGET_ORG_ID": "synthetic-org", "WORKER_NAME": "DiningAnalysisWorker"}
         spec = render("ghcr.io/example/app:synthetic", "api", env)
         self.assertEqual(spec["target_org_id"], "synthetic-org")
         service = spec["services"]["api"]
@@ -33,7 +33,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("API_TOKEN", service["env"])
         self.assertNotIn("UNRELATED_SETTING", service["env"])
         self.assertEqual(service["env"]["CAMERA"], "synthetic-camera")
-        self.assertEqual(service["env"]["WORKER_NAME"], "CookieDiningBotWorker")
+        self.assertEqual(service["env"]["WORKER_NAME"], "DiningAnalysisWorker")
 
     def test_renderer_can_use_mongodb_addon_without_volume_or_secret_values(self):
         env = {**self.parameters(), "PERSISTENCE_BACKEND": "mongodb"}

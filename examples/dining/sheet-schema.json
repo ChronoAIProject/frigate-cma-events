@@ -1,0 +1,12 @@
+{
+  "range": "A:J",
+  "id_column": "B",
+  "columns": [
+    "recorded_at", "meal_id", "camera", "activity_interval",
+    "dish_observations_json", "confidence", "evidence_times",
+    "uncertainty", "analysis_source", "status"
+  ],
+  "statuses": ["recorded", "integration_test", "pending"],
+  "remainder_labels": ["mostly_remaining", "partly_remaining", "nearly_empty", "empty", "unknown"],
+  "report_filter": "Include only status=recorded; exclude integration_test and pending."
+}

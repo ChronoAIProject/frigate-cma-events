@@ -1,0 +1,43 @@
+{
+  "log_level": "info",
+  "queue_max_items": 10000,
+  "http_timeout_seconds": 15,
+  "mqtt_sources": [{
+    "id": "frigate",
+    "host": "${MQTT_HOST}",
+    "port": "${MQTT_PORT}",
+    "username": "${MQTT_USERNAME}",
+    "password": "SET_MQTT_PASSWORD_IN_HA",
+    "tls": "${MQTT_TLS}",
+    "source_uri": "${EVENT_SOURCE}",
+    "event_type_path": "type",
+    "event_type_prefix": "frigate.review.",
+    "subject_path": "after.camera",
+    "heartbeat": {
+      "enabled": true,
+      "interval_seconds": 30,
+      "event_type": "frigate.bridge.heartbeat",
+      "subject": "${CAMERA}"
+    },
+    "topics": [{"topic": "frigate/reviews", "qos": 1}]
+  }],
+  "ha_sources": [],
+  "destinations": [{
+    "id": "dining",
+    "url": "${APP_ORIGIN}/ingest",
+    "auth_type": "bearer",
+    "auth_token": "SET_RELAY_TOKEN_IN_HA"
+  }],
+  "routes": [{
+    "id": "dining_metadata",
+    "source": "frigate",
+    "destination": "dining",
+    "event_types": ["frigate.review.*", "frigate.bridge.heartbeat"],
+    "topics": [],
+    "subjects": ["${CAMERA}"],
+    "json_equals": [],
+    "redact_paths": [],
+    "max_payload_bytes": 262144,
+    "max_per_minute": 0
+  }]
+}

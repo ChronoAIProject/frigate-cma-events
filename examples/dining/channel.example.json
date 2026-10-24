@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "record_id": "${CHANNEL_RECORD_ID}",
+  "name": "${WORKER_NAME}",
+  "profile": {
+    "schema_version": 1,
+    "metadata": {
+      "name": "${WORKER_NAME}",
+      "description": "Bounded dining review reference application",
+      "owner": {"kind": "human", "subject": "${CMA_OWNER_ID}"},
+      "provider": "cma_codex"
+    },
+    "model": {
+      "access": "managed", "service": "${MODEL_SERVICE}",
+      "api_type": "responses", "model": "${MODEL_NAME}",
+      "thinking_effort": "${MODEL_THINKING_EFFORT}"
+    },
+    "permission": {"action_mode": "autonomous", "service_scope": ["${EVIDENCE_SERVICE}", "${SHEETS_SERVICE}"]},
+    "context": {"skills": [], "mcp_servers": [], "system_prompt": "${WORKER_PROMPT}"},
+    "environment": {"size": {"cpu_cores": 1, "memory_gib": 2}, "workspace": {"type": "directory", "name": "dining-review"}}
+  },
+  "provider": {"slug": "cma_codex", "target": {"type": "existing_agent", "agent_id": "SET_READY_CMA_AGENT_ID"}},
+  "sources": [{"type": "custom", "auth": {"type": "hmac", "key_id": "${CMA_HMAC_KEY_ID}"}}],
+  "partition": {"version": 1, "key": "event_subject"},
+  "reply": {"auto_final": true, "ack_after_ms": 2000, "sinks": [{"type": "sync"}]},
+  "credentials": {
+    "agent_key": "SET_DISTINCT_NYXID_CHANNEL_KEY",
+    "hmac_secrets": [{"key_id": "${CMA_HMAC_KEY_ID}", "secret": "SET_BASE64_HMAC_SECRET"}]
+  }
+}
