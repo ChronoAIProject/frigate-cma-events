@@ -43,7 +43,13 @@ class State:
         self.lock = threading.RLock()
         self.engines = {}
         config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        config.data_dir.chmod(0o700)
+        # A PVC mount may be writable through its fsGroup while refusing chmod
+        # on the mount point itself. The platform owns that directory; SQLite
+        # files below it are still tightened to mode 0600 in _open().
+        try:
+            config.data_dir.chmod(0o700)
+        except PermissionError:
+            pass
         for path in config.data_dir.glob("*.sqlite3"):
             engine = self._open(path)
             row = engine.db.execute("SELECT value FROM meta WHERE key='binding_id'").fetchone()
