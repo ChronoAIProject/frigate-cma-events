@@ -80,7 +80,8 @@ class State:
         self.config = config
         self.lock = threading.RLock()
         self.engines = {}
-        self.evidence = (FrigateEvidence(config.frigate_proxy_url, config.frigate_api_key, config.rules.camera)
+        self.evidence = (FrigateEvidence(config.frigate_proxy_url, config.frigate_api_key, config.rules.camera,
+                                        config.rules.table_zone, config.evidence_options)
                          if config.frigate_proxy_url else None)
         self.evidence_cache = {}
         self.snapshots = None

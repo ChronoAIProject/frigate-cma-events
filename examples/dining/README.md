@@ -69,6 +69,13 @@ Meal intervals are activity hints. Cumulative zones do not establish continuous
 occupancy, and cleared dishes do not establish consumption. This application
 records whole-table observations, not identities or individual preferences.
 
+Evidence uses tableware-track phases and native-resolution crops of the Frigate
+table zone, rather than three room views just before the activity ends.
+`EVIDENCE_CROP_PADDING`, `EVIDENCE_MAX_WIDTH`, `EVIDENCE_MAX_HEIGHT` and
+`EVIDENCE_JPEG_QUALITY` tune the crop margin, panel bounds and encoding. Inspect
+the selected historical composite and its phase/warning metadata when checking
+recognition quality; a late activity frame is not necessarily a post-meal frame.
+
 ## 2. Render a private configuration bundle
 
 Run from the repository root:

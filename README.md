@@ -97,6 +97,19 @@ frame timestamps. Clients should save/decode locally and view the single image;
 never print base64 into a model transcript. At most three historical frames are
 used; missing recordings never fall back to current images. A small in-memory
 cache avoids repeated downloads; source media is not persisted by this service.
+The `tableware-phases-v2` selector uses Frigate's tableware object tracks to
+cover early, middle and late activity, preferring concurrent tracks within each
+phase. It avoids taking every frame after the table has already been cleared.
+Native recording snapshots are cropped to the configured `TABLE_ZONE` bounds
+before resizing, so dishes retain more pixels than a downscaled room view.
+Metadata/crop failures are explicit warnings with an interval/full-scene fallback;
+no phase is a claim that dining has ended or food was consumed.
+
+Evidence settings are deployment parameters: `EVIDENCE_CROP_PADDING` (normalized
+full-frame padding, default 0.04), `EVIDENCE_MAX_WIDTH` / `EVIDENCE_MAX_HEIGHT`
+(panel bounds, defaults 1280 / 720; never upscale), and `EVIDENCE_JPEG_QUALITY`
+(default 92). Table geometry comes from Frigate configuration, not source code.
+These settings do not change the aggregation rules or require a new state volume.
 With the adapter enabled, REST review repair is required before finalization,
 independently of any relay `resynced` assertion. A failed or truncated repair
 pauses decisions.

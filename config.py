@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from aggregation import Rules
+from evidence import EvidenceOptions
 
 
 def secret(name):
@@ -32,6 +33,7 @@ class Config:
     frigate_api_key: str = ""
     evidence_token: str = ""
     evidence_service: str = ""
+    evidence_options: EvidenceOptions = EvidenceOptions()
 
     @classmethod
     def from_env(cls):
@@ -66,6 +68,11 @@ class Config:
             frigate_api_key=secret("FRIGATE_API_KEY"),
             evidence_token=secret("EVIDENCE_TOKEN"),
             evidence_service=os.environ.get("EVIDENCE_SERVICE", "").strip(),
+            evidence_options=EvidenceOptions(
+                crop_padding=float(os.environ.get("EVIDENCE_CROP_PADDING", "0.04")),
+                max_width=int(os.environ.get("EVIDENCE_MAX_WIDTH", "1280")),
+                max_height=int(os.environ.get("EVIDENCE_MAX_HEIGHT", "720")),
+                jpeg_quality=int(os.environ.get("EVIDENCE_JPEG_QUALITY", "92"))),
         )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")

@@ -12,7 +12,8 @@ def render(image, service, environ):
     names = required + ("TIMEZONE", "PROVIDER_SLUG", "WORKER_NAME", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
                         "MINIMUM_SECONDS", "MAXIMUM_SECONDS", "COOLDOWN_SECONDS", "MAX_PER_DAY",
                         "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_EVENT_URL", "CMA_HMAC_KEY_ID",
-                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "EVIDENCE_SERVICE")
+                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "EVIDENCE_SERVICE",
+                        "EVIDENCE_CROP_PADDING", "EVIDENCE_MAX_WIDTH", "EVIDENCE_MAX_HEIGHT", "EVIDENCE_JPEG_QUALITY")
     env = {key: environ[key] for key in names if key in environ}
     env["DATA_DIR"] = "/data"
     service_spec = {

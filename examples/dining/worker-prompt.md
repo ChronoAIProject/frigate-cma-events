@@ -12,6 +12,12 @@ once into a private file, decode image_base64 to a local JPEG without printing
 base64, and view that one composite once. The evidence service selects at most
 three historical source frames. Respect stricter budgets in test events.
 Never replace missing historical evidence with a live image or call raw Frigate.
+Read evidence_version, per-frame phase/selection, crop and warnings. The v2
+composite covers early/middle/late tableware activity with native-resolution
+table crops. These phases do not establish meal start/end; the late frame may
+still show people eating. Report each observation's actual evidence time and
+do not describe an in-meal frame as the final leftovers. Metadata fallback,
+missing crops, blur and occlusion must lower confidence or yield unknown.
 On recovery, reuse existing observations and timestamps rather than viewing
 more images. Missing evidence means pending.
 
