@@ -1,0 +1,6 @@
+[
+  {"specversion":"1.0","source":"urn:homeassistant:event_bus:example-events","id":"synthetic-one","type":"homeassistant.state_changed","subject":"binary_sensor.example_motion","time":"2026-01-01T12:00:00Z","data":{"entity_id":"binary_sensor.example_motion","new_state":{"state":"on"}}},
+  {"specversion":"1.0","source":"urn:homeassistant:event_bus:example-events","id":"synthetic-off","type":"homeassistant.state_changed","subject":"binary_sensor.example_motion","time":"2026-01-01T12:00:10Z","data":{"entity_id":"binary_sensor.example_motion","new_state":{"state":"off"}}},
+  {"specversion":"1.0","source":"urn:homeassistant:event_bus:example-events","id":"synthetic-two","type":"homeassistant.state_changed","subject":"binary_sensor.example_motion","time":"2026-01-01T12:00:20Z","data":{"entity_id":"binary_sensor.example_motion","new_state":{"state":"on"}}},
+  {"specversion":"1.0","source":"urn:homeassistant:event_bus:example-events","id":"synthetic-three","type":"homeassistant.state_changed","subject":"binary_sensor.example_motion","time":"2026-01-01T12:00:40Z","data":{"entity_id":"binary_sensor.example_motion","new_state":{"state":"on"}}}
+]

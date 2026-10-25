@@ -1,6 +1,6 @@
 # Dining review: Home Assistant → CMA → Sheets
 
-This is the deployable reference application for this repository. Frigate
+This is a deployable example of the generic event pipeline. Frigate
 detects activity locally; a deterministic service selects candidates before a
 CMA worker performs bounded visual analysis and writes a Google Sheet. An
 existing NyxBot can query and summarize those records. All published values are
@@ -114,6 +114,7 @@ not-yet-created CMA Agent remain explicit `SET_...` placeholders.
 
 | Generated file | Use |
 | --- | --- |
+| `pipeline.json` | Fully resolved declarative dining policy, also embedded in the app spec |
 | `app-spec.json` | Cloud deployment: camera/rules, evidence service and persistence |
 | `app-secrets.json` | Private secret placeholders; fill before uploading |
 | `relay-options.json` | HA add-on options; fill broker password and relay token |
@@ -125,6 +126,10 @@ not-yet-created CMA Agent remain explicit `SET_...` placeholders.
 
 Edit generated files only in the private directory. If regenerating, use a new
 empty output directory and deliberately migrate any filled credentials/IDs.
+The generic service contains no dining decision branches: conditions, aliases,
+tableware labels, crop zone and output contract come from this policy. For an
+existing deployment, follow the [two-step migration](../../docs/pipeline.md#existing-dining-installations)
+before replacing legacy environment settings; retain its state and channel.
 
 ## 3. Supply credentials and register the evidence service
 

@@ -3,7 +3,6 @@
 import asyncio
 import base64
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 import hashlib
 import hmac
 import json
@@ -22,6 +21,7 @@ from pymongo.errors import PyMongoError
 from aggregation import Aggregator, Rules
 from config import Config
 from evidence import EvidenceUnavailable, FrigateEvidence
+from pipeline import Pipeline
 
 
 def canonical(value):
@@ -32,9 +32,9 @@ def digest(value):
     return "sha256:" + hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def cma_event_id(source, meal_id):
-    """Return a stable CloudEvent id for one finalized meal candidate."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, source + "\n" + "dining.meal_end_candidate\n" + meal_id))
+def cma_event_id(source, candidate_id, event_type="activity.window_candidate"):
+    """Return a stable CloudEvent identity for one configured output."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, source + "\n" + event_type + "\n" + candidate_id))
 
 
 def cma_signature(secret, webhook_id, webhook_timestamp, raw_body):
@@ -78,11 +78,15 @@ def check_id(value):
 class State:
     def __init__(self, config):
         self.config = config
+        self.pipeline = config.pipeline
         self.lock = threading.RLock()
         self.engines = {}
-        self.evidence = (FrigateEvidence(config.frigate_proxy_url, config.frigate_api_key, config.rules.camera,
-                                        config.rules.table_zone, config.evidence_options)
-                         if config.frigate_proxy_url else None)
+        media = self.pipeline.spec["evidence"]
+        self.evidence = (FrigateEvidence(config.frigate_proxy_url, config.frigate_api_key, self.pipeline.subject,
+                                        media["crop_zone"], config.evidence_options, labels=media["labels"],
+                                        version=media["version"], cautions=media["cautions"],
+                                        aliases=self.pipeline.spec["output"]["aliases"])
+                         if config.frigate_proxy_url and media["adapter"] == "frigate" else None)
         self.evidence_cache = {}
         self.evidence_busy = False
         self.snapshots = None
@@ -115,7 +119,7 @@ class State:
                 engine.close()
 
     def _open(self, path):
-        engine = Aggregator(path, self.config.rules)
+        engine = Aggregator(path, self.pipeline)
         path.chmod(0o600)
         engine.db.executescript("""
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -133,11 +137,22 @@ class State:
             CREATE TABLE IF NOT EXISTS validations (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS analysis_results (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         """)
-        old = self.get_meta(engine, "rules_digest")
-        if old is not None and old != digest(asdict(self.config.rules)):
+        old_policy = self.get_meta(engine, "policy_digest")
+        old_rules = self.get_meta(engine, "rules_digest")
+        current = digest(self.pipeline.state_document())
+        legacy = self.config.legacy_rules_document
+        if ((old_policy is not None and old_policy != current)
+                or (old_policy is None and old_rules is not None and (legacy is None or old_rules != digest(legacy)))):
             engine.close()
-            raise ValueError("Persisted rules differ; use a new data volume for a different ruleset")
+            raise ValueError("Persisted policy differs; upgrade legacy env first or use separate state for a different policy")
+        with engine.db:
+            self.put_meta(engine, "policy_digest", current)
         return engine
+
+    def stamp_rules(self, engine):
+        if self.config.legacy_rules_document is not None:
+            self.put_meta(engine, "rules_digest", digest(self.config.legacy_rules_document))
+        self.put_meta(engine, "policy_digest", digest(self.pipeline.state_document()))
 
     def _relay_engine(self):
         binding = "__relay_ingest__"
@@ -150,7 +165,7 @@ class State:
             self.put_meta(engine, "binding_id", binding)
             self.put_meta(engine, "owner", {"kind": "relay", "subject": "ingest"})
             self.put_meta(engine, "profile_digest", "relay-ingest-v1")
-            self.put_meta(engine, "rules_digest", digest(asdict(self.config.rules)))
+            self.stamp_rules(engine)
         self.engines[binding] = engine
         self.persist(engine)
         return engine
@@ -213,7 +228,7 @@ class State:
                 self.put_meta(engine, "binding_id", binding)
                 self.put_meta(engine, "owner", owner)
                 self.put_meta(engine, "profile_digest", body["profile_digest"])
-                self.put_meta(engine, "rules_digest", digest(asdict(self.config.rules)))
+                self.stamp_rules(engine)
             self.engines[binding] = engine
             self.persist(engine)
         # L1 is deliberately honest: the required model envelope is unused.
@@ -242,9 +257,10 @@ class State:
         cfg = self.config
         if not isinstance(event, dict) or event.get("source") != cfg.event_source:
             raise Problem(400, "event_source_mismatch")
-        if event.get("subject") != cfg.rules.camera:
-            raise Problem(400, "camera_mismatch")
-        if event.get("type") == "frigate.bridge.heartbeat":
+        source = self.pipeline.spec["source"]
+        if event.get("type") == source["health"]["event_type"]:
+            if source["subject"] != "*" and event.get("subject") != source["subject"]:
+                raise Problem(400, "subject_mismatch")
             if event.get("specversion") != "1.0" or not isinstance(event.get("id"), str) or not event["id"]:
                 raise Problem(400, "invalid_heartbeat")
             data = event.get("data", {})
@@ -256,7 +272,7 @@ class State:
         try:
             return engine.ingest(event, now)
         except (ValueError, KeyError, TypeError, AttributeError):
-            raise Problem(400, "invalid_review_event") from None
+            raise Problem(400, "invalid_source_event") from None
 
     def ingest_relay(self, event):
         engine = self._relay_engine()
@@ -265,19 +281,21 @@ class State:
         self.persist(engine)
         return result
 
-    def candidate(self, meal_id):
-        check_id(meal_id)
+    def candidate(self, candidate_id):
+        check_id(candidate_id)
         engine = self._relay_engine()
-        row = engine.db.execute("SELECT payload FROM decisions WHERE id=? AND reason='candidate'", (meal_id,)).fetchone()
+        row = engine.db.execute("SELECT payload FROM decisions WHERE id=? AND reason='candidate'", (candidate_id,)).fetchone()
         if row is None:
-            row = engine.db.execute("SELECT payload FROM validations WHERE id=?", (meal_id,)).fetchone()
+            row = engine.db.execute("SELECT payload FROM validations WHERE id=?", (candidate_id,)).fetchone()
         if row is None:
             raise Problem(404, "candidate_not_found")
-        return json.loads(row[0])
+        payload = json.loads(row[0])
+        return self.pipeline.aliases({**payload, "candidate_id": candidate_id,
+                                      "subject": payload.get("subject", self.pipeline.subject)})
 
     def reconcile(self, engine, now):
         """REST repair precedes finalization; broker connectivity is insufficient."""
-        cfg = self.config.rules
+        cfg = self.pipeline
         try:
             after = now - cfg.maximum_seconds - cfg.merge_seconds - cfg.delivery_grace_seconds
             rows = self.evidence.reviews(after)
@@ -338,25 +356,30 @@ class State:
         """Durably enqueue a candidate before attempting external delivery."""
         if not self.config.cma_event_url or payload.get("decision") != "candidate":
             return
-        meal_id = payload.get("meal_id")
-        camera = payload.get("camera")
-        if not isinstance(meal_id, str) or not isinstance(camera, str):
+        candidate_id = payload.get("candidate_id")
+        subject = payload.get("subject")
+        event_type = self.pipeline.spec["output"]["event_type"]
+        if not isinstance(candidate_id, str) or not isinstance(subject, str):
             return
         event = {
             "specversion": "1.0",
-            "id": cma_event_id(self.config.event_source, meal_id),
+            "id": cma_event_id(self.config.event_source, candidate_id, event_type),
             "source": self.config.event_source,
-            "type": "dining.meal_end_candidate",
-            "subject": camera,
+            "type": event_type,
+            "subject": subject,
             "datacontenttype": "application/json",
             "data": payload,
         }
-        if self.config.evidence_service:
+        if self.config.evidence_service and self.pipeline.spec["evidence"]["adapter"] != "none":
             event["data"] = {**payload, "evidence_budget": (payload["evidence_budget"] if payload.get("test")
                             else self.config.evidence_options.budget()), "evidence": {
-                "service": self.config.evidence_service, "path": "evidence/" + meal_id,
-                "result_path": "results/" + meal_id,
-                "instructions": "Fetch this bounded evidence JSON through NyxID into a private file. For v3 decode each images[].image_base64 locally and view each page once, within evidence_budget; never print base64. A 202 pending response or interrupted download may be retried at most 6 times after 5 seconds; cached retrieval does not resample. Frames have IDs and actual timestamps. Match rotating dishes across frames by appearance, never by fixed table position, and avoid duplicate counting. Quality/novelty scores and track counts do not identify food. Activity phases do not establish final leftovers. Never call raw Frigate or live images. Write/read back the configured Sheets row deduplicated by meal_id, then POST status, sheet_range and uncertainty to result_path. integration_test is excluded from meals; unavailable evidence means pending."}}
+                "service": self.config.evidence_service, "path": "evidence/" + candidate_id,
+                "result_path": "results/" + candidate_id,
+                "instructions": "Fetch this bounded evidence JSON through NyxID into a private file; decode images[].image_base64 locally and view each page once within evidence_budget. Never print base64. A 202 pending response or interrupted download may be retried at most 6 times after 5 seconds; cached retrieval does not resample. Frames have IDs and actual timestamps. Read all cautions; quality/novelty/track counts are heuristics, not semantic conclusions. Never call raw source media or live images. Follow the configured downstream workflow, deduplicate by candidate_id, independently verify side effects and then POST the configured result fields to result_path. integration_test is synthetic; unavailable evidence means pending."}}
+        if self.config.evidence_service and self.config.evidence_token:
+            event["data"] = {**event["data"], "result_callback": {"service": self.config.evidence_service,
+                "path": "results/" + candidate_id, "statuses": self.pipeline.spec["output"]["result_statuses"],
+                "fields": self.pipeline.spec["output"]["result_fields"]}}
         with engine.db:
             engine.db.execute(
                 "INSERT OR IGNORE INTO cma_deliveries(event_id,body,created_at,next_attempt_at) VALUES(?,?,?,?)",
@@ -444,7 +467,10 @@ class State:
                 if binding == "__relay_ingest__":
                     delivery_engines.append((binding, engine))
                 heartbeat = self.get_meta(engine, "heartbeat", {})
-                healthy = heartbeat.get("healthy") and heartbeat.get("resynced") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
+                health_policy = self.pipeline.spec["source"]["health"]
+                healthy = (health_policy["mode"] == "observed_events" or (heartbeat.get("healthy")
+                           and (heartbeat.get("resynced") or not health_policy["require_resynced"])
+                           and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds))
                 if binding == "__relay_ingest__" and self.evidence:
                     connected = heartbeat.get("healthy") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
                     # A successful REST check replaces the relay's unverified resynced assertion.
@@ -489,7 +515,7 @@ def create_app(config=None):
                 pass
             app.state.worker.close()
 
-    app = FastAPI(title="Frigate CMA Events", version="0.1.0", lifespan=lifespan,
+    app = FastAPI(title="CMA Event Pipeline", version="0.2.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -532,7 +558,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.1.0", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.2.0", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")
@@ -545,23 +571,25 @@ def create_app(config=None):
 
     def evidence_authorize(request):
         state = request.app.state.worker
-        if not state.evidence or not state.config.evidence_token:
+        if not state.config.evidence_token:
             raise Problem(503, "evidence_disabled")
         if not hmac.compare_digest(request.headers.get("authorization", "").encode(),
                                    ("Bearer " + state.config.evidence_token).encode()):
             raise Problem(401, "not_authenticated")
         return state
 
-    @app.get("/evidence/{meal_id}")
-    def evidence(meal_id: str, request: Request):
+    @app.get("/evidence/{candidate_id}")
+    def evidence(candidate_id: str, request: Request):
         state = evidence_authorize(request)
+        if state.evidence is None:
+            raise Problem(503, "evidence_disabled")
         with state.lock:
-            candidate = state.candidate(meal_id)
+            candidate = state.candidate(candidate_id)
             # A fixed bounded evidence pack per candidate; no source media on disk.
-            if meal_id in state.evidence_cache:
-                return state.evidence_cache[meal_id]
+            if candidate_id in state.evidence_cache:
+                return state.evidence_cache[candidate_id]
             if state.evidence_busy:
-                return JSONResponse({"status": "pending", "meal_id": meal_id}, status_code=202,
+                return JSONResponse(state.pipeline.aliases({"status": "pending", "candidate_id": candidate_id}), status_code=202,
                                     headers={"Retry-After": "5"})
             state.evidence_busy = True
         # Historical extraction must not hold the lock used by live ingestion.
@@ -573,29 +601,30 @@ def create_app(config=None):
             with state.lock:
                 while len(state.evidence_cache) >= 4:
                     state.evidence_cache.pop(next(iter(state.evidence_cache)))
-                state.evidence_cache[meal_id] = result
+                state.evidence_cache[candidate_id] = result
             return result
         finally:
             with state.lock:
                 state.evidence_busy = False
 
-    @app.post("/results/{meal_id}")
-    async def analysis_result(meal_id: str, request: Request):
+    @app.post("/results/{candidate_id}")
+    async def analysis_result(candidate_id: str, request: Request):
         state = evidence_authorize(request)
         value = await body(request)
-        if set(value) - {"status", "sheet_range", "uncertainty"} or value.get("status") not in {"recorded", "integration_test", "pending"}:
+        output = state.pipeline.spec["output"]
+        if set(value) - {"status", *output["result_fields"]} or value.get("status") not in output["result_statuses"]:
             raise Problem(400, "invalid_result")
         if any(not isinstance(v, str) or len(v) > 2000 for v in value.values()):
             raise Problem(400, "invalid_result")
         with state.lock:
-            candidate = state.candidate(meal_id)
-            if candidate.get("test") and value["status"] == "recorded":
-                raise Problem(400, "test_is_not_a_meal")
+            candidate = state.candidate(candidate_id)
+            if candidate.get("test") and value["status"] not in {"pending", "integration_test"}:
+                raise Problem(400, "test_is_not_a_real_outcome")
             engine = state._relay_engine()
             with engine.db:
-                engine.db.execute("INSERT OR REPLACE INTO analysis_results VALUES(?,?)", (meal_id, canonical(value)))
+                engine.db.execute("INSERT OR REPLACE INTO analysis_results VALUES(?,?)", (candidate_id, canonical(value)))
             state.persist(engine)
-        return {"meal_id": meal_id, "accepted": True}
+        return state.pipeline.aliases({"candidate_id": candidate_id, "accepted": True})
 
     @app.post("/api/validation")
     def validation(request: Request):
@@ -610,16 +639,16 @@ def create_app(config=None):
                 review = max(rows, key=lambda r: r["end_time"])
             except (EvidenceUnavailable, ValueError, KeyError, TypeError):
                 raise Problem(424, "validation_history_unavailable") from None
-            meal_id, now = "integration_test_" + uuid.uuid4().hex, review["end_time"]
-            candidate = {"meal_id": meal_id, "camera": state.config.rules.camera, "decision": "candidate",
+            candidate_id, now = "integration_test_" + uuid.uuid4().hex, review["end_time"]
+            candidate = state.pipeline.aliases({"candidate_id": candidate_id, "subject": state.pipeline.subject, "decision": "candidate",
                          "started_at": review["start_time"], "ended_at": now, "test": True,
-                         "validation_mode": "integration_test", "review_ids": [review["id"]],
-                         "evidence_budget": {"max_model_turns": 1, "max_images": 1, "max_source_frames": 1}}
+                         "validation_mode": "integration_test", "event_ids": [review["id"]],
+                         "evidence_budget": {"max_model_turns": 1, "max_images": 1, "max_source_frames": 1}})
             with engine.db:
-                engine.db.execute("INSERT INTO validations VALUES(?,?)", (meal_id, canonical(candidate)))
+                engine.db.execute("INSERT INTO validations VALUES(?,?)", (candidate_id, canonical(candidate)))
                 state._queue_cma_candidate(engine, candidate, time.time())
             state.persist(engine)
-        return {"meal_id": meal_id, "test": True}
+        return state.pipeline.aliases({"candidate_id": candidate_id, "test": True})
 
     @app.get("/.well-known/agent-card.json")
     def card():
@@ -693,13 +722,13 @@ def create_app(config=None):
                     "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in state.engines.values()),
                     "cma_deliveries": {"pending": pending, "delivered": delivered}}
 
-    @app.get("/api/results/{meal_id}")
-    def result_read(meal_id: str, request: Request):
+    @app.get("/api/results/{candidate_id}")
+    def result_read(candidate_id: str, request: Request):
         state = authorize(request, operator=True)
         with state.lock:
-            state.candidate(meal_id)
-            row = state._relay_engine().db.execute("SELECT payload FROM analysis_results WHERE id=?", (meal_id,)).fetchone()
-            return {"meal_id": meal_id, "result": json.loads(row[0]) if row else None}
+            state.candidate(candidate_id)
+            row = state._relay_engine().db.execute("SELECT payload FROM analysis_results WHERE id=?", (candidate_id,)).fetchone()
+            return state.pipeline.aliases({"candidate_id": candidate_id, "result": json.loads(row[0]) if row else None})
 
     @app.get("/api/bindings/{binding}/decisions")
     def decisions(binding: str, request: Request):
@@ -714,6 +743,12 @@ def create_app(config=None):
         authorize(request, operator=True)
         value = await body(request)
         try:
+            if "events" in value:
+                from aggregation import replay_events
+                state = request.app.state.worker
+                cfg = Pipeline.parse(value["pipeline"]) if "pipeline" in value else state.pipeline
+                return {"decisions": replay_events(value["events"], cfg, value.get("now")),
+                        "model_calls": 0, "persistent_writes": 0}
             cfg = Rules(**value["rules"])
             reviews = value["reviews"]
             if not isinstance(reviews, list) or len(reviews) > 100:
@@ -727,9 +762,16 @@ def create_app(config=None):
                 output = engine.flush(now, source_healthy=True)
             finally:
                 engine.close()
-        except (ValueError, TypeError, KeyError, AttributeError):
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
             raise Problem(400, "invalid_replay") from None
         return {"decisions": output, "model_calls": 0, "persistent_writes": 0}
+
+    @app.get("/api/pipeline")
+    def pipeline_config(request: Request):
+        state = authorize(request, operator=True)
+        return {"pipeline": state.pipeline.spec, "state_digest": digest(state.pipeline.state_document()),
+                "evidence_options": {name: getattr(state.config.evidence_options, name)
+                                     for name in state.config.evidence_options.__dataclass_fields__}}
 
     return app
 

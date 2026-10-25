@@ -19,9 +19,14 @@ class DiningExampleTests(unittest.TestCase):
                 "CMA_OWNER_ID": "synthetic-owner", "MQTT_TLS": "true", "MQTT_PORT": "8883"}
 
     def test_bundle_keeps_camera_routes_credentials_and_sheet_paths_consistent(self):
-        payloads = bundle("ghcr.io/example/app:synthetic", {**self.parameters(), "RELAY_TOKEN": "must-not-be-copied"})
+        payloads = bundle("ghcr.io/example/app:synthetic", {**self.parameters(), "RELAY_TOKEN": "must-not-be-copied",
+                         "EVIDENCE_DENSITY_WEIGHT": "0.3"})
         self.assertNotIn("must-not-be-copied", json.dumps(payloads))
         self.assertNotIn("${", json.dumps(payloads))
+        env = payloads["app-spec.json"]["services"]["dining-api"]["env"]
+        self.assertEqual(json.loads(env["PIPELINE_CONFIG_JSON"]), payloads["pipeline.json"])
+        self.assertNotIn("CAMERA", env)
+        self.assertEqual(payloads["pipeline.json"]["evidence"]["options"]["density_weight"], 0.3)
         relay = payloads["relay-options.json"]
         source = relay["mqtt_sources"][0]
         self.assertIs(source["tls"], True)

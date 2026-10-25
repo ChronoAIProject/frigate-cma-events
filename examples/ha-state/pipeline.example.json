@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "ha-state-activity",
+  "source": {
+    "adapter": "cloudevents",
+    "source": "urn:homeassistant:event_bus:example-events",
+    "subject": "*",
+    "types": ["homeassistant.state_changed"],
+    "mode": "point",
+    "filter": {"field": "data.new_state.state", "op": "eq", "value": "on"},
+    "fields": {"attributes": {"state": "data.new_state.state", "entity_id": "data.entity_id"}},
+    "health": {"mode": "observed_events"}
+  },
+  "window": {"merge_seconds": 60, "settle_seconds": 10, "maximum_seconds": 3600},
+  "activity": {"name": "repeated_activity", "minimum_events": 3},
+  "limits": {"cooldown_seconds": 300, "max_per_day": 100, "timezone": "UTC"},
+  "output": {
+    "event_type": "home.activity_candidate",
+    "schema": "home-activity-candidate.v1",
+    "cautions": ["Only received on-transition events are summarized; this does not establish occupancy or absence."],
+    "result_statuses": ["processed", "pending", "integration_test"],
+    "result_fields": ["reference", "uncertainty"]
+  },
+  "evidence": {"adapter": "none"}
+}

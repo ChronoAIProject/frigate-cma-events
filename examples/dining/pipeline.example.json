@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "name": "dining",
+  "source": {
+    "adapter": "frigate_reviews",
+    "source": "${EVENT_SOURCE}",
+    "subject": "${CAMERA}",
+    "types": [
+      "frigate.review.new",
+      "frigate.review.update",
+      "frigate.review.end"
+    ],
+    "filter": {},
+    "mode": "span",
+    "fields": {},
+    "health": {
+      "mode": "heartbeat",
+      "event_type": "frigate.bridge.heartbeat",
+      "require_resynced": true
+    }
+  },
+  "window": {
+    "merge_seconds": "${MERGE_SECONDS}",
+    "settle_seconds": "${DELIVERY_GRACE_SECONDS}",
+    "maximum_seconds": "${MAXIMUM_SECONDS}"
+  },
+  "activity": {
+    "name": "seated_activity",
+    "minimum_seconds": "${MINIMUM_SECONDS}",
+    "reason": "short_or_non_dining_activity",
+    "match": {
+      "all": [
+        {
+          "field": "severity",
+          "op": "eq",
+          "value": "alert"
+        },
+        {
+          "field": "labels",
+          "op": "contains_any",
+          "value": [
+            "person"
+          ]
+        },
+        {
+          "field": "zones",
+          "op": "contains_any",
+          "value": [
+            "${SEATS_ZONE}"
+          ]
+        }
+      ]
+    },
+    "minimum_events": 1
+  },
+  "requirements": [
+    {
+      "name": "tableware",
+      "reason": "no_tableware_evidence",
+      "match": {
+        "all": [
+          {
+            "field": "zones",
+            "op": "contains_any",
+            "value": [
+              "${TABLE_ZONE}"
+            ]
+          },
+          {
+            "field": "labels",
+            "op": "contains_any",
+            "value": [
+              "plate",
+              "bowl",
+              "cup",
+              "bottle"
+            ]
+          }
+        ]
+      },
+      "minimum_seconds": 0,
+      "minimum_events": 1
+    }
+  ],
+  "limits": {
+    "cooldown_seconds": "${COOLDOWN_SECONDS}",
+    "max_per_day": "${MAX_PER_DAY}",
+    "timezone": "${TIMEZONE}"
+  },
+  "output": {
+    "event_type": "dining.meal_end_candidate",
+    "schema": "dining-review-candidate.v1",
+    "id_prefix": "${CAMERA}",
+    "aliases": {
+      "meal_id": "candidate_id",
+      "camera": "subject",
+      "review_ids": "event_ids",
+      "review_count": "event_count",
+      "alert_interval_seconds": "activity_seconds",
+      "tableware_seen": "conditions.tableware.matched"
+    },
+    "budget": {
+      "max_model_turns": 1,
+      "max_images": 1,
+      "max_source_frames": 3
+    },
+    "result_statuses": [
+      "recorded",
+      "pending",
+      "integration_test"
+    ],
+    "result_fields": [
+      "sheet_range",
+      "uncertainty"
+    ],
+    "cautions": [
+      "Candidate activity, not a confirmed meal.",
+      "Review intervals and zones do not measure continuous seat occupancy.",
+      "No image was viewed. Food, leftovers and clearing are unverified."
+    ]
+  },
+  "evidence": {
+    "adapter": "frigate",
+    "crop_zone": "${TABLE_ZONE}",
+    "labels": [
+      "plate",
+      "bowl",
+      "cup",
+      "bottle"
+    ],
+    "version": "tableware-diversity-v3",
+    "cautions": [
+      "Activity is not proof of a meal; removed food is not proof it was eaten.",
+      "Early/middle/late describe tableware activity, not confirmed meal phases.",
+      "Late frames can precede meal end; missing dishes do not establish leftovers.",
+      "A turntable moves the same dish. Match by appearance across frames, not fixed position; do not count it twice.",
+      "Sampling cannot guarantee a complete turntable revolution or visibility of every dish."
+    ],
+    "options": {}
+  }
+}

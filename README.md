@@ -1,233 +1,162 @@
-# Frigate CMA Events
+# CMA Event Pipeline
 
-A deployable reference application: turn Home Assistant / Frigate activity into
-bounded dining observations, review them with a CMA worker, and record the
-results in Google Sheets. An existing NyxBot can query and summarize the records.
-
-**Start with the [complete dining example](examples/dining/README.md)** for local
-prerequisites, private configuration generation, worker/channel setup, deployment
-and tests. [examples/dining](examples/dining) contains synthetic templates; your
-camera, spreadsheet, account and credentials are supplied during installation.
-
-The service persists event receipts, merges activity and emits **candidate
-metadata**. It performs no model inference, executes no commands and sends no
-chat messages. Its optional evidence adapter reads bounded historical frames;
-the separate CMA worker performs the image analysis and verified Sheet write.
+A configurable service for turning Frigate reviews, Home Assistant events and
+custom CloudEvents into bounded activity candidates for a CMA worker. The
+runtime handles normalization, filtering, per-subject windows, deduplication,
+limits, optional historical evidence, and durable signed delivery. Workers
+perform the application-specific analysis and verified destination writes.
 
 ```text
-Frigate → HA Event Relay → durable aggregation → bounded candidate
-  → CMA custom event channel → visual worker → Google Sheets → NyxBot query
+HA / MQTT / Frigate -> HA Event Relay -> /ingest
+  -> configured source adapter + predicates
+  -> per-subject windows + conditions + limits
+  -> durable outbox -> owner's CMA event channel -> configured worker/destination
+                         |
+              optional bounded historical evidence
 ```
 
-The reference application uses relay HTTP ingestion and CMA's registered
-`cma_codex` provider with an existing Agent. Channel partitioning routes events;
-aggregation happens in this service before the model is called. `dining-evidence`
-is a NyxID service entry for this same deployed app, not a separate process.
+The service performs no model inference, runs no user scripts and sends no
+chat messages. The published image is
+`ghcr.io/chronoaiproject/frigate-cma-events`; the repository/image address remains
+usable by existing installations.
 
-The service also implements CMA's L1 binding/conversation/Responses interfaces
-for integrations that need them. Using that optional provider interface through
-the gateway requires operator registration; the reference application uses
-`/ingest` and does not require that registration.
+## Examples
 
-## Behavior
+| Application | Input / rules | Evidence | Downstream |
+| --- | --- | --- | --- |
+| [Dining](examples/dining/README.md) | Frigate person intervals plus a configured object/zone requirement | Multi-view table crops | Dish observations, verified Sheets row |
+| [HA activity](examples/ha-state/README.md) | Selected state transitions, grouped and counted per entity | None | Metadata summary, chosen destination |
+| [Vehicle visits](examples/driveway/README.md) | Car/motorcycle intervals in a configured region | Vehicle views | Configured activity worker |
 
-- Merge overlapping review intervals and gaps up to `MERGE_SECONDS`.
-- Wait for explicit review ends, a quiet window and delivery settlement.
-- Require sufficient person/seat alert intervals and tableware evidence.
-- Count overlapping intervals once; preserve ended reviews against late updates.
-- Persist deduplication, admitted turns, their original contexts and decisions.
-- Refuse finalization without a fresh healthy, resynchronized bridge heartbeat.
-- Enforce a cooldown and daily candidate cap. Candidates have no images; their
-  downstream budget declares one model turn and one comparison image with at most
-  three source frames. Configured candidate delivery uses a signed CMA outbox.
+Each example uses the same runtime. Names, sources, entity/camera selectors,
+regions, conditions, output event types, evidence labels and selection weights
+are deployment configuration. Public examples contain synthetic values only.
+The dining renderer produces a complete private installation bundle including
+`pipeline.json`, worker instructions, channel and Sheet settings.
 
-Review intervals and cumulative zones are activity hints, not continuous seat
-occupancy or proof that a meal happened. Dishes being removed does not prove their
-food was eaten. The service labels its output accordingly.
+## Configuration
 
-## Deployment configuration
+Supply a validated JSON document through `PIPELINE_CONFIG_FILE` or
+`PIPELINE_CONFIG_JSON`. The [pipeline guide](docs/pipeline.md) describes the
+schema, predicates, adapters and migration. For example:
 
-All installation-specific values are supplied at deployment. Published templates
-and tests use synthetic values. Generated installation files stay outside this
-checkout; private deployment settings, real event samples and credentials do
-not belong in this repository.
+```sh
+# Copy an example to a private location and set installation-specific values.
+export PIPELINE_CONFIG_FILE=/private/path/pipeline.json
+uv run python deploy/render.py --image ghcr.io/OWNER/PACKAGE@sha256:DIGEST \
+  --service events-api --output /private/path/app-spec.json
+```
 
-Required environment variables:
+The renderer validates configuration and embeds it in the private app spec.
+Secrets are declared by name, never copied into plain env or configuration.
+`PROVIDER_TOKEN` and `API_TOKEN` are distinct mounted secrets of at least 32
+characters; `RELAY_TOKEN` authenticates `/ingest`. Tokens support `_FILE`.
+Configure `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID` and mounted `CMA_HMAC_SECRET` to send
+candidates to the owner's existing CMA channel/Agent. No new provider registry
+entry or administrator access is required for normal relay ingestion.
 
-| Variable | Purpose |
-| --- | --- |
-| `CAMERA` | Exact Frigate camera name |
-| `SEATS_ZONE`, `TABLE_ZONE` | Exact configured Frigate zone names |
-| `EVENT_SOURCE` | Allowed CloudEvent source URI |
-| `PROVIDER_TOKEN` | This app's optional L1 provider API bearer, at least 32 characters; separate from a NyxID channel key |
-| `API_TOKEN` | Different operator API bearer, at least 32 characters |
+For worker callbacks, optionally configure `WORKER_SERVICE` (the owner's NyxID
+service entry for this app) and distinct mounted `WORKER_TOKEN`. The historical
+Frigate adapter additionally needs `FRIGATE_PROXY_URL` and mounted
+`FRIGATE_API_KEY`, scoped to the exact source service/node. Existing
+`EVIDENCE_SERVICE` / `EVIDENCE_TOKEN` names are supported. Model keys, Sheets and
+NyxBot settings belong to the chosen worker/example, not the aggregation engine.
 
-Tokens also support `_FILE` variants for mounted secrets. Never put token values
-in the app spec, Git, logs or command-line arguments.
+Other deployment controls are `DATA_DIR`, `HEARTBEAT_SECONDS` (90),
+`TICK_SECONDS` (5), `CMA_TIMEOUT_SECONDS` (8), `PROVIDER_SLUG`, and the public
+agent-card display name `WORKER_NAME`. See [deployment](deploy/README.md).
 
-Optional settings:
+## Runtime guarantees
 
-| Variable | Default |
-| --- | --- |
-| `DATA_DIR` | `/data` (mount a persistent volume) |
-| `PROVIDER_SLUG` | `frigate_rules` |
-| `WORKER_NAME` | `Frigate rule consumer`; public agent-card display name only |
-| `TIMEZONE` | `UTC` |
-| `MERGE_SECONDS` | `300` |
-| `DELIVERY_GRACE_SECONDS` | `60` |
-| `MINIMUM_SECONDS`, `MAXIMUM_SECONDS` | `480`, `14400` |
-| `COOLDOWN_SECONDS`, `MAX_PER_DAY` | `3600`, `3` |
-| `HEARTBEAT_SECONDS`, `TICK_SECONDS` | `90`, `5` |
-| `CMA_EVENT_URL` | CMA custom event URL; empty disables downstream delivery |
-| `CMA_HMAC_KEY_ID` | HMAC key id configured on the CMA channel |
-| `CMA_TIMEOUT_SECONDS` | `8`; bounded request timeout |
-| `FRIGATE_PROXY_URL` | Exact HTTPS NyxID proxy URL for the owner's Frigate service; empty disables evidence |
-| `EVIDENCE_SERVICE` | Owner's NyxID service slug for this app; supplied to the worker in candidate metadata |
+- Receipts and original admitted contexts persist. Reuse of an accepted event
+  identity with different content is rejected; retries do not add activity.
+- Normalize source lifecycles and merge overlapping/nearby records per subject.
+  Count overlapping qualifying intervals once. Ended spans cannot reopen.
+- Require explicit span ends, the configured quiet window and receipt grace.
+- Apply declarative activity/requirement predicates, duration/count thresholds,
+  cooldowns and daily limits per subject.
+- Heartbeat mode requires fresh affirmative health. Frigate REST repair is
+  required before finalization when its historical adapter is enabled.
+- Explicit `observed_events` mode is limited to point-event summaries. It never
+  establishes source continuity, absence, occupancy or completion.
+- Candidate output contains bounded projected metadata, condition metrics,
+  stable IDs, evidence budgets and configured cautions. It does not assert the
+  application's real-world conclusion.
+- Store the exact signed CMA outbox body before sending. Retry transient errors
+  with backoff; retain permanent failures for inspection. CMA admission is not
+  proof of worker completion or an external write.
 
-The optional evidence adapter requires two separate deployment secrets:
-`FRIGATE_API_KEY`, scoped only to Frigate and its exact node, and `EVIDENCE_TOKEN`,
-used by a separate cloud HTTP service credential. CMA's managed worker key needs
-only that HTTP service and Sheets, with no direct HA node grant. Rotate the
-Frigate key before its NyxID expiry. No images or credentials belong in Git.
+One deployment runs one pipeline, one process and one replica. A wildcard
+subject handles many entities with separate windows/limits. Independent
+policies or owners use separate app/state/channel deployments. Configuration
+loads at startup; HTTP callers cannot install code or modify policy.
 
-`GET /evidence/{meal_id}` requires `EVIDENCE_TOKEN`. It resolves only stored
-finalized candidates (or explicit integration validations), uses their fixed
-camera/timestamps, and returns a versioned JSON evidence pack with `images[]`
-(base64 JPEG pages), frame IDs and actual timestamps. Clients should save/decode
-locally and view each page once; never print base64 into a model transcript.
-Missing recordings never fall back to current images. A small in-memory
-cache avoids repeated downloads; source media is not persisted by this service.
-The `tableware-diversity-v3` selector samples up to 24 historical frames, mixing
-broad early/middle/late activity coverage with short bursts around Frigate
-tableware-track anchors. It selects up to 12 complementary views using image
-quality, visual novelty and tracked-object density, then packs at most four
-frames per page (at most three pages). Near duplicates and poor-quality views
-are filtered within each phase; the ceilings are not mandatory frame counts.
-The scores are heuristics, not food, dish-count or occlusion detection. The
-worker matches rotating dishes by appearance and frame IDs, not fixed positions;
-neither unique dish identity nor a full turntable revolution is guaranteed.
-Native recording snapshots are cropped to the configured `TABLE_ZONE` bounds
-before resizing, so dishes retain more pixels than a downscaled room view.
-Quality and novelty are scored inside the table polygon when available.
-Metadata/crop failures are explicit warnings with an interval/full-scene fallback;
-no phase is a claim that dining has ended or food was consumed.
-Extraction has a time budget and retains only bounded cropped JPEGs in memory.
-It releases the live-ingestion lock while sampling, permits only one sampling
-job at a time, and returns `202 pending`/`Retry-After: 5` for overlapping requests.
-Retry that same endpoint at most six times after five seconds, including an
-interrupted download; a completed cached retrieval does not resample.
+## Historical evidence
 
-Evidence settings are deployment parameters: `EVIDENCE_CROP_PADDING` (normalized
-full-frame padding, default 0.04), `EVIDENCE_MAX_WIDTH` / `EVIDENCE_MAX_HEIGHT`
-(panel bounds, defaults 1280 / 720; never upscale), and `EVIDENCE_JPEG_QUALITY`
-(default 92). Table geometry comes from Frigate configuration, not source code.
-`EVIDENCE_SAMPLE_FRAMES` (default 24, range 6..48),
-`EVIDENCE_SELECTED_FRAMES` (default 12, range 3..12, no more than samples),
-`EVIDENCE_BURST_SECONDS` (default 12, range 2..60) and
-`EVIDENCE_SAMPLING_SECONDS` (default 35, range 5..40) bound coverage and cost.
-Event budgets advertise upstream source samples separately from selected frames
-and image pages. Validation remains one source frame and one image.
-These settings do not change the aggregation rules or require a new state volume.
-With the adapter enabled, REST review repair is required before finalization,
-independently of any relay `resynced` assertion. A failed or truncated repair
-pauses decisions.
+The `frigate` adapter resolves stored candidate IDs only. It reads configured
+object tracks and region geometry, combines broad time coverage with short
+bursts, then ranks native-resolution crops by quality, configured track density
+and visual novelty. Defaults: at most 24 source samples, 12 selected frames and
+three JPEG pages. Static scenes can yield fewer frames. Quality and novelty are
+heuristics, not object identity or semantic recognition.
 
-`POST /results/{meal_id}` with the evidence token records the worker's structured
-`status`, `sheet_range` and `uncertainty` after write/readback. This is the
-worker's report, not an independent Sheet check. Operators can read it via
-`GET /api/results/{meal_id}`. `POST /api/validation` with `API_TOKEN` queues an
-explicit synthetic `integration_test` candidate in a separate table; it does
-not insert fake reviews or consume the real dining daily cap. Exclude test rows
-from meal summaries. Admission delivery alone does not prove model completion
-or a Sheet write.
+The worker saves `images[]` locally and views each page once within the supplied
+budget. Every selected frame has an ID and actual historical timestamp. Missing
+recordings never fall back to live images. Extraction has bounded time, image
+sizes and volatile cache; it releases the ingestion lock while sampling. An
+overlapping request returns `202 pending` with `Retry-After: 5`; retry the same
+resource at most six times after five seconds, including interrupted downloads.
+Cached retrieval does not resample.
 
-When `CMA_EVENT_URL` is set, mount `CMA_HMAC_SECRET` (or set
-`CMA_HMAC_SECRET_FILE`) as a deployment secret. The service signs each
-`dining.meal_end_candidate` CloudEvent and keeps a durable outbox. Successful
-2xx responses are marked delivered; 429 and 5xx responses retry with backoff,
-while permanent 4xx responses remain retained for operator inspection. The exact
-event body is stored before the first send.
+Labels, crop zone, cautions and `EvidenceOptions` weights/thresholds are set in
+`evidence` configuration. `EVIDENCE_*` deployment overrides remain supported;
+see the [guide](docs/pipeline.md). Evidence settings can change without resetting
+aggregation. Integration validation uses one source frame and one image.
 
-Use one process, one replica and one persistent volume. The deployment renderer
-uses those bounds. A changed ruleset requires a new volume; startup refuses to
-mix existing decisions with a different camera or rule configuration. Use a
-separate test app/volume for synthetic traffic. Storage is not automatically
-pruned in v0.1; monitor the persistent volume and archive it when retiring a test.
+## API
 
-For platforms whose PVC mounts are not writable by the non-root container, set
-the deployment renderer's `PERSISTENCE_BACKEND=mongodb`. This adds the platform's
-MongoDB add-on and stores serialized SQLite snapshots in it while keeping the
-working files ephemeral. The add-on connection is supplied through `MONGODB_URI`
-and `MONGODB_DATABASE`; no database credential belongs in source or plain env.
+Public: `GET /healthz` and `GET /.well-known/agent-card.json`. Other routes use
+bearer authentication; installation details are never in public health output.
+
+| Route | Credential | Purpose |
+| --- | --- | --- |
+| `POST /ingest` | Relay | Admit a configured source CloudEvent |
+| `GET /api/status` | Operator | Counts and delivery backlog |
+| `GET /api/pipeline` | Operator | Effective policy, state digest, evidence options |
+| `GET /api/bindings/{binding}/decisions` | Operator | Last 100 decisions |
+| `POST /api/replay` | Operator | Isolated offline replay; no delivery/model/persistent writes |
+| `GET /evidence/{candidate_id}` | Worker | Configured historical evidence pack |
+| `POST /results/{candidate_id}` | Worker | Configured string status/result fields |
+| `GET /api/results/{candidate_id}` | Operator | Reported analysis result |
+| `POST /api/validation` | Operator | Explicit one-frame Frigate integration validation |
+
+Callbacks are worker reports, not independent proof of external writes. Their
+allowed statuses/fields come from `output`. Application workers must verify
+side effects themselves. `integration_test` never asserts a real outcome.
+
+Optional CMA L1 binding/conversation/Responses interfaces remain available with
+`PROVIDER_TOKEN`. They return empty output, preserve exact original event context,
+and enforce immutable ownership/profile digests and durable admission. Using
+that optional provider interface via a gateway requires operator registration;
+normal `/ingest` -> signed custom channel delivery does not.
+
+## Development and state
 
 ```sh
 uv sync --frozen
 uv run python -m unittest discover -s tests -v
-# Set the required variables / mounted secrets before starting:
+uv run python aggregation.py examples/ha-state/events.example.json \
+  --pipeline examples/ha-state/pipeline.example.json
+# With private config and mounted secrets supplied:
 uv run uvicorn service:app --host 0.0.0.0 --port 8080 --no-access-log
 ```
 
-The Docker image runs as an unprivileged user. GitHub Actions tests every push
-and publishes `ghcr.io/chronoaiproject/frigate-cma-events:sha-<full-commit>`.
-
-See [deployment instructions](deploy/README.md) for cloud spec/secrets and the
-optional provider interface. The [dining walkthrough](examples/dining/README.md)
-covers the complete application and generated worker/channel/relay templates.
-
-## API and authentication
-
-`GET /healthz` and `GET /.well-known/agent-card.json` are public and expose no
-installation parameters. Other routes require bearer authentication:
-
-| Interface | Token | Routes |
-| --- | --- | --- |
-| CMA binding lifecycle | `PROVIDER_TOKEN` | PUT/DELETE `/api/v1/cmaeg/bindings/{binding}` |
-| CMA conversation lifecycle | `PROVIDER_TOKEN` | PUT/DELETE `.../{binding}/conversations/{conversation}` |
-| Durable admission | `PROVIDER_TOKEN` | POST `/api/v2/responses`, `Idempotency-Key` required |
-| Original event context | `PROVIDER_TOKEN` | GET `.../{binding}/conversations/{conversation}/events/{event}` |
-| Aggregate counts | `API_TOKEN` | GET `/api/status` |
-| Bounded decision list | `API_TOKEN` | GET `/api/bindings/{binding}/decisions` |
-| Isolated synthetic/offline replay | `API_TOKEN` | POST `/api/replay` |
-
-Binding ownership and profile digest are immutable. The binding bearer must
-match its `agent_key`; no caller can self-register with a new arbitrary secret.
-Deleting a binding or conversation revokes future access, including old contexts.
-The provider token is a single-installation trust boundary; use separate
-deployments/tokens for mutually untrusted owners. It does not grant any NyxID,
-Home Assistant, model or deployment permission.
-
-The Responses endpoint accepts only custom CloudEvents from `EVENT_SOURCE` for
-`CAMERA`, with matching event identity. It returns `response.created` followed by
-`response.completed` with **empty output**, so raw events cannot become chat
-replies. A retry returns the same response ID; changed content under the same
-identity is rejected. Context and aggregation admission commit together.
-
-`frigate.review.new`, `.update` and `.end` carry the MQTT review envelope in
-`data`. `wrap_review` creates stable CloudEvents from that envelope.
-`frigate.bridge.heartbeat` reports connection health. HA Event Relay reports
-`resynced:false` because MQTT connectivity cannot establish source history. With
-the evidence adapter enabled, this service repairs reviews through the Frigate
-REST API before finalization. A custom adapter using the standalone L1 provider
-may assert `resynced:true` only after actually repairing history. Silence alone
-is never proof of a meal ending.
-
-## Deployed smoke tests
-
-The smoke script creates only synthetic activity and never calls a vision model.
-Its `CAMERA`, zone, source and provider settings must match the **test deployment**.
-Credentials are read from environment variables or files.
-
-```sh
-uv run python scripts/smoke.py --base-url https://YOUR-TEST-APP.example \
-  --state /private/path/smoke-state.json
-# After restarting the deployed container, verify persistent receipt and decision:
-uv run python scripts/smoke.py --base-url https://YOUR-TEST-APP.example \
-  --state /private/path/smoke-state.json --resume
-```
-
-This exercises the deployed L1 provider directly and should use an isolated test
-app with evidence/CMA delivery disabled. The dining example separately documents
-an explicit integration validation through CMA, image review, Sheet write/readback
-and NyxBot query, plus a real-meal test for camera detection and trigger quality.
+The Docker image runs as an unprivileged user. Mount writable persistent state
+or use the platform MongoDB add-on (`PERSISTENCE_BACKEND=mongodb` in the renderer)
+for bounded SQLite snapshots. State is not automatically pruned; monitor and
+archive it. A changed aggregation policy requires separate state; startup refuses
+to mix policy histories. The [migration procedure](docs/pipeline.md#existing-dining-installations)
+allows an equivalent legacy dining installation to adopt explicit configuration
+while preserving IDs, decisions, receipts, outbox and results.
 
 Licensed under Apache-2.0.

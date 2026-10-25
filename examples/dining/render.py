@@ -1,5 +1,6 @@
 """Render non-secret example parameters into a private installation bundle."""
 import argparse
+from dataclasses import fields
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from deploy.render import render as render_app
+from profiles import Rules
+from evidence import EvidenceOptions
 
 REQUIRED = (
     "APP_ORIGIN", "CAMERA", "SEATS_ZONE", "TABLE_ZONE", "EVENT_SOURCE",
@@ -27,9 +30,8 @@ DEFAULTS = {
 }
 OPTIONAL = ("TARGET_ORG_ID", "PERSISTENCE_BACKEND", "CMA_EVENT_URL", "MINIMUM_SECONDS",
             "MAXIMUM_SECONDS", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS", "COOLDOWN_SECONDS",
-            "MAX_PER_DAY", "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_TIMEOUT_SECONDS", "SHEET_COLUMNS_JSON",
-            "EVIDENCE_CROP_PADDING", "EVIDENCE_MAX_WIDTH", "EVIDENCE_MAX_HEIGHT", "EVIDENCE_JPEG_QUALITY",
-            "EVIDENCE_SAMPLE_FRAMES", "EVIDENCE_SELECTED_FRAMES", "EVIDENCE_BURST_SECONDS", "EVIDENCE_SAMPLING_SECONDS")
+            "MAX_PER_DAY", "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_TIMEOUT_SECONDS", "SHEET_COLUMNS_JSON")
+OPTIONAL += tuple("EVIDENCE_" + field.name.upper() for field in fields(EvidenceOptions))
 
 
 def expand(value, parameters):
@@ -74,6 +76,17 @@ def bundle(image, environ):
            "read_path": base + quote(tab + "A:J", safe=""),
            "append_path": base + quote(tab + "A:J", safe="") + ":append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"}
     prompt = (HERE / "worker-prompt.md").read_text() + "\n\nPrivate deployment configuration:\n" + json.dumps(cfg, ensure_ascii=False)
+    rules = {"camera": params["CAMERA"], "seats_zone": params["SEATS_ZONE"], "table_zone": params["TABLE_ZONE"]}
+    for field in fields(Rules):
+        name = field.name.upper()
+        if field.name not in rules and name in params:
+            rules[field.name] = params[name] if field.name == "timezone" else int(params[name])
+    pipeline = Rules(**rules).pipeline(params["EVENT_SOURCE"]).spec
+    for name, field in EvidenceOptions.__dataclass_fields__.items():
+        value = params.get("EVIDENCE_" + name.upper())
+        if value is not None:
+            pipeline["evidence"]["options"][name] = int(value) if isinstance(field.default, int) else float(value)
+    params["PIPELINE_CONFIG_JSON"] = json.dumps(pipeline, ensure_ascii=False)
     params.update(CHANNEL_RECORD_ID=str(uuid.uuid4()), WORKER_PROMPT=prompt)
     relay = expand(json.loads((HERE / "relay-options.example.json").read_text()), params)
     relay["mqtt_sources"][0].update(port=port, tls=params["MQTT_TLS"] == "true")
@@ -88,7 +101,7 @@ def bundle(image, environ):
               "Report evidence uncertainty; do not identify people or infer preferences. "
               "Do not fetch new images or send external notifications for a record query.\n\n"
               + json.dumps(cfg, ensure_ascii=False))
-    return {"app-spec.json": render_app(image, params["APP_SERVICE"], params),
+    return {"app-spec.json": render_app(image, params["APP_SERVICE"], params), "pipeline.json": pipeline,
             "relay-options.json": relay, "dining-config.json": cfg, "worker-request.json": worker,
             "channel-request.json": expand(json.loads((HERE / "channel.example.json").read_text()), params),
             "app-secrets.json": json.loads((HERE / "app-secrets.example.json").read_text()),

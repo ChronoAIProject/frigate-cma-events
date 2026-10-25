@@ -1,7 +1,7 @@
 [project]
 name = "frigate-cma-events"
-version = "0.1.0"
-description = "Deterministic, persistent Frigate event aggregation and a CMA L1 consumer"
+version = "0.2.0"
+description = "Configurable event windows, bounded evidence, and durable CMA delivery"
 requires-python = ">=3.12"
 dependencies = [
     "pillow>=12,<13",

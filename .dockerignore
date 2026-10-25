@@ -6,3 +6,9 @@
 !config.py
 !service.py
 !evidence.py
+!pipeline.py
+!adapters.py
+!profiles.py
+!examples/
+!examples/dining/
+!examples/dining/pipeline.example.json

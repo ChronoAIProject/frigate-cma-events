@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "name": "vehicle-visit",
+  "source": {
+    "adapter": "frigate_reviews",
+    "source": "urn:example:frigate",
+    "subject": "example_driveway"
+  },
+  "window": {"merge_seconds": 90, "settle_seconds": 20, "maximum_seconds": 3600},
+  "activity": {
+    "name": "vehicle_presence",
+    "minimum_seconds": 10,
+    "match": {"all": [
+      {"field": "labels", "op": "contains_any", "value": ["car", "motorcycle"]},
+      {"field": "zones", "op": "contains_any", "value": ["example_gate"]}
+    ]}
+  },
+  "limits": {"cooldown_seconds": 120, "max_per_day": 50, "timezone": "UTC"},
+  "output": {
+    "event_type": "security.vehicle_visit_candidate",
+    "schema": "vehicle-visit-candidate.v1",
+    "cautions": ["Detected activity is not proof of an arrival, departure, visitor identity or authorization."]
+  },
+  "evidence": {
+    "adapter": "frigate",
+    "crop_zone": "example_gate",
+    "labels": ["car", "motorcycle"],
+    "options": {"sample_frames": 18, "selected_frames": 6, "density_weight": 0.2, "quality_weight": 0.5, "novelty_weight": 0.3},
+    "cautions": ["Different views can show the same vehicle. Do not infer identity or trigger device controls."]
+  }
+}

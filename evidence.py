@@ -31,8 +31,19 @@ class EvidenceOptions:
     selected_frames: int = 12
     burst_seconds: float = 12
     sampling_seconds: float = 35
+    density_weight: float = 0.25
+    quality_weight: float = 0.35
+    novelty_weight: float = 0.4
+    duplicate_threshold: float = 0.018
+    minimum_quality_ratio: float = 0.6
+    novelty_scale: float = 0.12
 
     def __post_init__(self):
+        if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
+            raise ValueError("Evidence options require finite numeric values")
+        if any(type(getattr(self, name)) is not int for name in (
+                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames")):
+            raise ValueError("Evidence dimensions, quality and frame counts require integers")
         if not 0 <= self.crop_padding <= 0.15:
             raise ValueError("EVIDENCE_CROP_PADDING must be between 0 and 0.15")
         if not 320 <= self.max_width <= 1600 or not 180 <= self.max_height <= 900:
@@ -43,6 +54,11 @@ class EvidenceOptions:
             raise ValueError("Evidence requires 6..48 samples and 3..12 selected frames, not more than samples")
         if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
             raise ValueError("Invalid evidence burst or sampling time budget")
+        if any(not finite(v) or not 0 <= v <= 1 for v in (self.density_weight, self.quality_weight,
+                self.novelty_weight, self.duplicate_threshold, self.minimum_quality_ratio)):
+            raise ValueError("Invalid evidence selection weights or thresholds")
+        if self.density_weight + self.quality_weight + self.novelty_weight <= 0 or not 0 < self.novelty_scale <= 1:
+            raise ValueError("Selection needs a positive weight and novelty scale")
 
     def budget(self):
         return {"max_model_turns": 1, "max_images": math.ceil(self.selected_frames / 4),
@@ -54,10 +70,10 @@ def finite(value):
 
 
 def select_frames(start, end, events):
-    """Cover early/middle/late tableware activity, preferring concurrent tracks.
+    """Cover early/middle/late object activity, preferring concurrent tracks.
 
-    Snapshot times are useful anchors, not proof of food. A long-lived track can
-    also supply phase midpoints. Empty phases stay empty; clearing is not a meal.
+    Snapshot times are useful anchors, not semantic conclusions. A long-lived
+    track can also supply phase midpoints. Empty phases stay empty.
     """
     if not events:
         return [{"timestamp": start + (end - start) * f, "phase": phase,
@@ -88,15 +104,15 @@ def select_frames(start, end, events):
             rank, timestamp = max(ranked)
             used.add(round(timestamp, 3))
             selected.append({"timestamp": timestamp, "phase": phase,
-                             "selection": "tableware_tracks", "tracked_objects": rank[0]})
+                             "selection": "object_tracks", "tracked_objects": rank[0]})
     return selected
 
 
 def sample_frames(start, end, events, options):
-    """Bounded broad coverage plus short bursts around dish-track anchors.
+    """Bounded broad coverage plus short bursts around object-track anchors.
 
     Interleave phases so a slow/missing recording does not consume the entire
-    budget on early activity. Track counts are proposals, never dish counts.
+    budget on early activity. Track counts are proposals, not semantic conclusions.
     """
     anchors = {f["phase"]: f["timestamp"] for f in select_frames(start, end, events)}
     first = min(e["start"] for e in events) if events else start
@@ -124,14 +140,14 @@ def sample_frames(start, end, events, options):
             seen.add(round(timestamp, 3))
             active = [e for e in events if e["start"] <= timestamp <= e["end"]]
             pool.append({"timestamp": timestamp, "phase": phase, "sampling": source,
-                         "selection": "tableware_tracks" if events else "interval_fallback",
+                         "selection": "object_tracks" if events else "interval_fallback",
                          "tracked_objects": len(active)})
         pools.append(pool)
     return [pool[j] for j in range(max(map(len, pools), default=0)) for pool in pools if j < len(pool)]
 
 
 def visual_metrics(panel, polygon=None):
-    """Cheap image-quality/novelty heuristics, not a food or occlusion model."""
+    """Cheap image-quality/novelty heuristics, not semantic or occlusion detection."""
     small = panel.resize((48, 32), Image.Resampling.BILINEAR)
     mask = Image.new("L", small.size, 0 if polygon else 255)
     if polygon:
@@ -151,25 +167,26 @@ def visual_distance(left, right):
     return sum(abs(a - b) for a, b in zip(left, right, strict=True)) / (255 * len(left))
 
 
-def select_diverse_frames(records, limit):
+def select_diverse_frames(records, limit, options=None):
     """Keep quality and complementary views within every activity phase."""
+    options = options or EvidenceOptions()
     chosen = []
     for i, phase in enumerate(("early", "middle", "late")):
         pool = [r for r in records if r["phase"] == phase]
         quota = limit // 3 + (i < limit % 3)
         picked = []
         peak = max((r["tracked_objects"] for r in pool), default=1) or 1
-        floor = max((r["quality"] for r in pool), default=0) * 0.6
+        floor = max((r["quality"] for r in pool), default=0) * options.minimum_quality_ratio
         while pool and len(picked) < quota:
             ranked = []
             for record in pool:
                 if record["quality"] < floor:
                     continue
-                novelty = min((visual_distance(record["_signature"], p["_signature"]) for p in picked), default=0.12)
-                if picked and novelty < 0.018:
+                novelty = min((visual_distance(record["_signature"], p["_signature"]) for p in picked), default=options.novelty_scale)
+                if picked and novelty < options.duplicate_threshold:
                     continue
-                rank = (0.25 * record["tracked_objects"] / peak + 0.35 * record["quality"]
-                        + 0.4 * min(1, novelty / 0.12), record["quality"], -record["timestamp"])
+                rank = (options.density_weight * record["tracked_objects"] / peak + options.quality_weight * record["quality"]
+                        + options.novelty_weight * min(1, novelty / options.novelty_scale), record["quality"], -record["timestamp"])
                 ranked.append((rank, record, novelty))
             if not ranked:
                 break
@@ -182,14 +199,17 @@ def select_diverse_frames(records, limit):
 
 
 class FrigateEvidence:
-    def __init__(self, proxy_url, key, camera, table_zone="", options=None):
+    def __init__(self, proxy_url, key, camera, crop_zone="", options=None, *, labels=(),
+                 version="historical-diversity-v1", cautions=(), aliases=None):
         url = urlsplit(proxy_url)
         if (url.scheme != "https" or not url.hostname or url.username or url.password
                 or url.query or url.fragment):
             raise ValueError("FRIGATE_PROXY_URL must be an HTTPS service proxy URL")
         self.url, self.key, self.camera = proxy_url.rstrip("/"), key, camera
-        self.table_zone, self.options = table_zone, options or EvidenceOptions()
-        self.table_polygon = None
+        self.crop_zone, self.options = crop_zone, options or EvidenceOptions()
+        self.roi_polygon = None
+        self.labels, self.version, self.cautions = tuple(labels), version, list(cautions)
+        self.aliases = aliases or {}
         self.opener = build_opener(NoRedirect)
 
     def get(self, path, limit=2 * 1024 * 1024, timeout=15):
@@ -217,13 +237,15 @@ class FrigateEvidence:
         except (ValueError, TypeError) as exc:
             raise EvidenceUnavailable("invalid_review_response") from exc
 
-    def tableware_events(self, start, end):
+    def object_events(self, start, end):
+        if not self.labels:
+            return []
         # Include overlapping tracks which started before the activity window.
-        query = {"cameras": self.camera, "labels": "plate,bowl,cup,bottle",
+        query = {"cameras": self.camera, "labels": ",".join(self.labels),
                  "after": start - max(end - start, 60), "before": end + 0.001,
                  "limit": 1000, "include_thumbnails": 0}
-        if self.table_zone:
-            query["zones"] = self.table_zone
+        if self.crop_zone:
+            query["zones"] = self.crop_zone
         try:
             rows = json.loads(self.get("api/events?" + urlencode(query)))
             if not isinstance(rows, list) or len(rows) >= 1000:
@@ -231,9 +253,9 @@ class FrigateEvidence:
             events = []
             for row in rows:
                 if (not isinstance(row, dict) or row.get("camera") != self.camera
-                        or row.get("label") not in {"plate", "bowl", "cup", "bottle"}
+                        or row.get("label") not in self.labels
                         or row.get("false_positive") is True
-                        or (self.table_zone and self.table_zone not in row.get("zones", []))):
+                        or (self.crop_zone and self.crop_zone not in row.get("zones", []))):
                     continue
                 left, right = row.get("start_time"), row.get("end_time")
                 right = end if right is None else right
@@ -248,16 +270,16 @@ class FrigateEvidence:
                                "score": score if finite(score) and 0 <= score <= 1 else 0})
             return events
         except (ValueError, TypeError, AttributeError) as exc:
-            raise EvidenceUnavailable("invalid_tableware_metadata") from exc
+            raise EvidenceUnavailable("invalid_object_metadata") from exc
 
-    def table_crop(self):
-        """Use the deployment's existing normalized Frigate table-zone geometry."""
-        self.table_polygon = None
-        if not self.table_zone:
+    def crop_bounds(self):
+        """Use the deployment's normalized Frigate region geometry."""
+        self.roi_polygon = None
+        if not self.crop_zone:
             return None
         try:
             config = json.loads(self.get("api/config"))
-            coords = config["cameras"][self.camera]["zones"][self.table_zone]["coordinates"]
+            coords = config["cameras"][self.camera]["zones"][self.crop_zone]["coordinates"]
             values = [float(v) for v in coords.split(",")] if isinstance(coords, str) else coords
             if len(values) < 6 or len(values) % 2 or any(not finite(v) or not 0 <= v <= 1 for v in values):
                 raise ValueError()
@@ -269,13 +291,13 @@ class FrigateEvidence:
                       min(1, max(x) + pad), min(1, max(y) + pad)]
             if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
                 raise ValueError()
-            self.table_polygon = list(zip(x, y, strict=True))
+            self.roi_polygon = list(zip(x, y, strict=True))
             return bounds
         except (ValueError, KeyError, TypeError) as exc:
-            raise EvidenceUnavailable("table_zone_unavailable") from exc
+            raise EvidenceUnavailable("crop_zone_unavailable") from exc
 
     def composite(self, candidate):
-        if candidate.get("camera") != self.camera:
+        if candidate.get("subject") != self.camera:
             raise EvidenceUnavailable("camera_mismatch")
         start, end = candidate["started_at"], candidate["ended_at"]
         if not all(finite(t) for t in (start, end)) or end < start:
@@ -287,20 +309,20 @@ class FrigateEvidence:
                            "selection": "integration_test", "tracked_objects": 0}]
         else:
             try:
-                events = self.tableware_events(start, end)
+                events = self.object_events(start, end)
             except EvidenceUnavailable as exc:
                 events = []
                 warnings.append(str(exc))
             selections = sample_frames(start, end, events, self.options)
             if not events:
-                warnings.append("No usable tableware tracks; interval and burst samples only.")
+                warnings.append("No usable configured object tracks; interval and burst samples only.")
         try:
-            crop = self.table_crop()
+            crop = self.crop_bounds()
         except EvidenceUnavailable as exc:
             crop = None
             warnings.append(str(exc))
         if crop is None:
-            warnings.append("Table crop unavailable; full-scene evidence has lower table detail.")
+            warnings.append("Region crop unavailable; full-scene evidence has lower region detail.")
         records, missing, attempted, retained_bytes = [], [], 0, 0
         for selection in selections:
             timestamp = selection["timestamp"]
@@ -309,7 +331,7 @@ class FrigateEvidence:
                 warnings.append("Candidate sampling budget exhausted; partial coverage only.")
                 break
             # Fetch native resolution first. Resizing the whole room before
-            # cropping destroys precisely the small dish details we need.
+            # cropping destroys small region details.
             path = "api/" + quote(self.camera, safe="") + f"/recordings/{timestamp:.3f}/snapshot.jpg"
             attempted += 1
             try:
@@ -326,13 +348,13 @@ class FrigateEvidence:
                     panel.thumbnail((self.options.max_width, self.options.max_height), Image.Resampling.LANCZOS)
                 polygon = ([(max(0, min(1, (x - crop[0]) / (crop[2] - crop[0]))),
                              max(0, min(1, (y - crop[1]) / (crop[3] - crop[1]))))
-                            for x, y in self.table_polygon] if crop and self.table_polygon else None)
+                            for x, y in self.roi_polygon] if crop and self.roi_polygon else None)
                 encoded = BytesIO()
                 panel.save(encoded, format="JPEG", quality=self.options.jpeg_quality)
                 jpeg = encoded.getvalue()
                 retained_bytes += len(jpeg)
                 records.append({**selection, "source_size": original_size, "crop_pixels": box,
-                                "panel_size": list(panel.size), "scoring_region": "table_polygon" if polygon else "crop",
+                                "panel_size": list(panel.size), "scoring_region": "roi_polygon" if polygon else "crop",
                                 **visual_metrics(panel, polygon), "_jpeg": jpeg})
             except (EvidenceUnavailable, UnidentifiedImageError, OSError, Image.DecompressionBombError):
                 missing.append(timestamp)
@@ -340,7 +362,7 @@ class FrigateEvidence:
             raise EvidenceUnavailable("historical_frames_unavailable")
         if missing:
             warnings.append("Some candidate historical frames are unavailable; coverage is incomplete.")
-        selected = records if candidate.get("test") else select_diverse_frames(records, self.options.selected_frames)
+        selected = records if candidate.get("test") else select_diverse_frames(records, self.options.selected_frames, self.options)
         annotations, images = [], []
         for offset in range(0, len(selected), 4):
             page = selected[offset:offset + 4]
@@ -367,16 +389,16 @@ class FrigateEvidence:
                            "mime_type": "image/jpeg", "image_base64": base64.b64encode(data.getvalue()).decode()})
         budget = ({"max_model_turns": 1, "max_images": 1, "max_source_frames": 1, "max_selected_frames": 1}
                   if candidate.get("test") else self.options.budget())
-        return {"meal_id": candidate["meal_id"], "camera": self.camera,
+        identity = candidate["candidate_id"]
+        return {"candidate_id": identity, "subject": self.camera,
+                **{name: identity if path == "candidate_id" else self.camera
+                   for name, path in self.aliases.items() if path in {"candidate_id", "subject"}},
                 "images": images, "frame_timestamps": [r["timestamp"] for r in selected], "missing_timestamps": missing,
-                "evidence_version": "tableware-diversity-v3", "frames": annotations, "evidence_budget": budget,
+                "evidence_version": self.version, "frames": annotations, "evidence_budget": budget,
                 "sampling": {"planned": len(selections), "attempted": attempted, "available": len(records),
                              "selected": len(selected), "discarded": len(records) - len(selected)},
                 "crop_normalized": crop, "warnings": warnings,
                 "test": bool(candidate.get("test")),
-                "cautions": ["Activity is not proof of a meal; removed food is not proof it was eaten.",
-                             "Early/middle/late describe tableware activity, not confirmed meal phases.",
-                             "Late frames can precede meal end; missing dishes do not establish leftovers.",
-                             "Track counts, quality and visual novelty are heuristics, not dish counts or occlusion detection.",
-                             "A turntable moves the same dish. Match by appearance across frames, not fixed position; do not count it twice.",
-                             "Sampling cannot guarantee a complete turntable revolution or visibility of every dish."]}
+                "cautions": ["Activity phases do not establish a real-world outcome.",
+                             "Track counts, quality and visual novelty are heuristics, not semantic recognition.",
+                             *self.cautions]}

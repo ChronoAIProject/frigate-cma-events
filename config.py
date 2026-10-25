@@ -1,9 +1,11 @@
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
+import json
 import os
 from pathlib import Path
 
 from aggregation import Rules
 from evidence import EvidenceOptions
+from pipeline import Pipeline
 
 
 def secret(name):
@@ -13,7 +15,7 @@ def secret(name):
 
 @dataclass(frozen=True)
 class Config:
-    rules: Rules
+    rules: Rules | Pipeline
     data_dir: Path
     provider_token: str
     api_token: str
@@ -35,23 +37,48 @@ class Config:
     evidence_service: str = ""
     evidence_options: EvidenceOptions = EvidenceOptions()
 
+    @property
+    def pipeline(self):
+        return self.rules.pipeline(self.event_source) if isinstance(self.rules, Rules) else self.rules
+
+    @property
+    def legacy_rules_document(self):
+        return asdict(self.rules) if isinstance(self.rules, Rules) else None
+
     @classmethod
     def from_env(cls):
-        required = ("CAMERA", "SEATS_ZONE", "TABLE_ZONE", "EVENT_SOURCE")
-        if any(not os.environ.get(k) for k in required):
-            raise ValueError("Required deployment variables: " + ", ".join(required))
-        raw = {"camera": os.environ["CAMERA"], "seats_zone": os.environ["SEATS_ZONE"],
-               "table_zone": os.environ["TABLE_ZONE"]}
-        for field in fields(Rules):
-            if field.name in raw:
-                continue
-            value = os.environ.get(field.name.upper())
+        document = os.environ.get("PIPELINE_CONFIG_JSON")
+        file = os.environ.get("PIPELINE_CONFIG_FILE")
+        if document and file:
+            raise ValueError("Use PIPELINE_CONFIG_JSON or PIPELINE_CONFIG_FILE, not both")
+        if document or file:
+            rule = Pipeline.parse(json.loads(Path(file).read_text() if file else document))
+            source = rule.spec["source"]["source"]
+            if not source or os.environ.get("EVENT_SOURCE", source) != source:
+                raise ValueError("Pipeline source must be explicit and agree with EVENT_SOURCE")
+            pipeline = rule
+        else:
+            required = ("CAMERA", "SEATS_ZONE", "TABLE_ZONE", "EVENT_SOURCE")
+            if any(not os.environ.get(k) for k in required):
+                raise ValueError("Provide PIPELINE_CONFIG_JSON/FILE or legacy deployment variables: " + ", ".join(required))
+            raw = {"camera": os.environ["CAMERA"], "seats_zone": os.environ["SEATS_ZONE"], "table_zone": os.environ["TABLE_ZONE"]}
+            for field in fields(Rules):
+                if field.name in raw:
+                    continue
+                value = os.environ.get(field.name.upper())
+                if value is not None:
+                    raw[field.name] = value if field.name == "timezone" else int(value)
+            rule, source = Rules(**raw), os.environ["EVENT_SOURCE"]
+            pipeline = rule.pipeline(source)
+        evidence_options = dict(pipeline.spec["evidence"]["options"])
+        for field in fields(EvidenceOptions):
+            value = os.environ.get("EVIDENCE_" + field.name.upper())
             if value is not None:
-                raw[field.name] = value if field.name == "timezone" else int(value)
+                evidence_options[field.name] = int(value) if isinstance(getattr(EvidenceOptions(), field.name), int) else float(value)
         config = cls(
-            rules=Rules(**raw), data_dir=Path(os.environ.get("DATA_DIR", "/data")),
+            rules=rule, data_dir=Path(os.environ.get("DATA_DIR", "/data")),
             provider_token=secret("PROVIDER_TOKEN"), api_token=secret("API_TOKEN"),
-            event_source=os.environ["EVENT_SOURCE"],
+            event_source=source,
             relay_token=secret("RELAY_TOKEN") or secret("API_TOKEN"),
             provider_slug=os.environ.get("PROVIDER_SLUG", "frigate_rules"),
             worker_name=os.environ.get("WORKER_NAME", "Frigate rule consumer").strip(),
@@ -66,17 +93,9 @@ class Config:
             cma_timeout_seconds=float(os.environ.get("CMA_TIMEOUT_SECONDS", "8")),
             frigate_proxy_url=os.environ.get("FRIGATE_PROXY_URL", "").strip(),
             frigate_api_key=secret("FRIGATE_API_KEY"),
-            evidence_token=secret("EVIDENCE_TOKEN"),
-            evidence_service=os.environ.get("EVIDENCE_SERVICE", "").strip(),
-            evidence_options=EvidenceOptions(
-                crop_padding=float(os.environ.get("EVIDENCE_CROP_PADDING", "0.04")),
-                max_width=int(os.environ.get("EVIDENCE_MAX_WIDTH", "1280")),
-                max_height=int(os.environ.get("EVIDENCE_MAX_HEIGHT", "720")),
-                jpeg_quality=int(os.environ.get("EVIDENCE_JPEG_QUALITY", "92")),
-                sample_frames=int(os.environ.get("EVIDENCE_SAMPLE_FRAMES", "24")),
-                selected_frames=int(os.environ.get("EVIDENCE_SELECTED_FRAMES", "12")),
-                burst_seconds=float(os.environ.get("EVIDENCE_BURST_SECONDS", "12")),
-                sampling_seconds=float(os.environ.get("EVIDENCE_SAMPLING_SECONDS", "35"))),
+            evidence_token=secret("WORKER_TOKEN") or secret("EVIDENCE_TOKEN"),
+            evidence_service=(os.environ.get("WORKER_SERVICE") or os.environ.get("EVIDENCE_SERVICE", "")).strip(),
+            evidence_options=EvidenceOptions(**evidence_options),
         )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")
@@ -92,9 +111,9 @@ class Config:
             raise ValueError("CMA_HMAC_KEY_ID and CMA_HMAC_SECRET are required when CMA_EVENT_URL is set")
         if not 0.5 <= config.cma_timeout_seconds <= 30:
             raise ValueError("CMA_TIMEOUT_SECONDS must be between 0.5 and 30")
-        if config.frigate_proxy_url:
+        if config.frigate_proxy_url and pipeline.spec["evidence"]["adapter"] == "frigate":
             if not config.frigate_api_key or len(config.evidence_token) < 32 or not config.evidence_service:
                 raise ValueError("Evidence requires FRIGATE_API_KEY, EVIDENCE_TOKEN and EVIDENCE_SERVICE")
-            if config.evidence_token in {config.api_token, config.provider_token, config.relay_token}:
-                raise ValueError("Use a separate evidence token")
+        if config.evidence_token and (len(config.evidence_token) < 32 or config.evidence_token in {config.api_token, config.provider_token, config.relay_token}):
+            raise ValueError("Use a separate worker/evidence token of at least 32 characters")
         return config

@@ -61,8 +61,8 @@ class EvidenceTests(unittest.TestCase):
 
     def test_missing_historical_frames_never_fall_back_to_live(self):
         client = FrigateEvidence("https://proxy.example/service", "private-key", "test-camera")
-        candidate = {"meal_id": "meal-test", "camera": "test-camera", "started_at": 100, "ended_at": 200}
-        with patch.object(client, "tableware_events", return_value=[]), \
+        candidate = {"candidate_id": "meal-test", "subject": "test-camera", "started_at": 100, "ended_at": 200}
+        with patch.object(client, "object_events", return_value=[]), \
                 patch.object(client, "get", side_effect=EvidenceUnavailable("missing")) as get:
             with self.assertRaises(EvidenceUnavailable):
                 client.composite(candidate)
@@ -90,19 +90,19 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(point), 1)
 
     def test_metadata_filters_camera_zone_false_positives_and_clamps_overlapping_tracks(self):
-        client = FrigateEvidence("https://proxy.example/service", "private-key", "test-camera", "table")
+        client = FrigateEvidence("https://proxy.example/service", "private-key", "test-camera", "table", labels=("bowl",))
         event = {"camera": "test-camera", "label": "bowl", "zones": ["table"],
                  "start_time": 50, "end_time": 400, "data": {"snapshot_frame_time": 80, "top_score": 0.8}}
         rows = [event, {**event, "camera": "other"}, {**event, "zones": ["other"]},
                 {**event, "false_positive": True}, {**event, "label": "person"},
                 {**event, "start_time": 500, "end_time": 600}]
         with patch.object(client, "get", return_value=json.dumps(rows)) as get:
-            events = client.tableware_events(100, 300)
+            events = client.object_events(100, 300)
         self.assertEqual(events, [{"start": 100, "end": 300, "snapshot": 200, "score": 0.8}])
         self.assertIn("include_thumbnails=0", get.call_args.args[0])
         with patch.object(client, "get", return_value=json.dumps([event] * 1000)):
             with self.assertRaises(EvidenceUnavailable):
-                client.tableware_events(100, 300)
+                client.object_events(100, 300)
 
     def test_native_table_crop_preserves_detail_and_deduplicates_static_views(self):
         client = FrigateEvidence("https://proxy.example/service", "private-key", "test-camera", "table",
@@ -112,8 +112,8 @@ class EvidenceTests(unittest.TestCase):
         geometry = {"cameras": {"test-camera": {"zones": {"table": {"coordinates": "0.25,0.25,0.75,0.25,0.75,0.75,0.25,0.75"}}}}}
         def get(path, **kwargs):
             return json.dumps(geometry) if path == "api/config" else blob.getvalue()
-        candidate = {"meal_id": "synthetic-meal", "camera": "test-camera", "started_at": 100, "ended_at": 400}
-        with patch.object(client, "tableware_events", return_value=[]), patch.object(client, "get", side_effect=get) as request:
+        candidate = {"candidate_id": "synthetic-meal", "subject": "test-camera", "started_at": 100, "ended_at": 400}
+        with patch.object(client, "object_events", return_value=[]), patch.object(client, "get", side_effect=get) as request:
             result = client.composite(candidate)
         self.assertEqual(len(result["frames"]), 3)
         self.assertEqual(result["frames"][0]["source_size"], [1920, 1080])
@@ -130,19 +130,19 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(image.size, (1920, 2 * (540 + 28)))
         geometry["cameras"]["test-camera"]["zones"]["table"]["coordinates"] = "0.5,0.5,0.5,0.5,0.5,0.5"
         with patch.object(client, "get", return_value=json.dumps(geometry)), self.assertRaises(EvidenceUnavailable):
-            client.table_crop()
+            client.crop_bounds()
 
     def test_bad_zone_and_missing_metadata_are_explicit_without_live_fallback(self):
         client = FrigateEvidence("https://proxy.example/service", "private-key", "test-camera", "table")
         blob = BytesIO()
         Image.new("RGB", (640, 360), "white").save(blob, format="JPEG")
-        candidate = {"meal_id": "synthetic-meal", "camera": "test-camera", "started_at": 100, "ended_at": 200}
-        with patch.object(client, "tableware_events", side_effect=EvidenceUnavailable("metadata_offline")), \
-                patch.object(client, "table_crop", side_effect=EvidenceUnavailable("table_zone_unavailable")), \
+        candidate = {"candidate_id": "synthetic-meal", "subject": "test-camera", "started_at": 100, "ended_at": 200}
+        with patch.object(client, "object_events", side_effect=EvidenceUnavailable("metadata_offline")), \
+                patch.object(client, "crop_bounds", side_effect=EvidenceUnavailable("crop_zone_unavailable")), \
                 patch.object(client, "get", return_value=blob.getvalue()) as get:
             result = client.composite(candidate)
         self.assertIn("metadata_offline", result["warnings"])
-        self.assertIn("table_zone_unavailable", result["warnings"])
+        self.assertIn("crop_zone_unavailable", result["warnings"])
         self.assertIsNone(result["crop_normalized"])
         self.assertEqual([f["phase"] for f in result["frames"]], ["early", "middle", "late"])
         self.assertTrue(all(100 <= t <= 200 for t in result["frame_timestamps"]))
@@ -192,10 +192,10 @@ class EvidenceTests(unittest.TestCase):
             blob = BytesIO()
             Image.new("RGB", (320, 180), (counter[0]*10, counter[0]*5, counter[0]*3)).save(blob, "JPEG")
             return blob.getvalue()
-        candidate = {"meal_id": "synthetic-meal", "camera": "test-camera", "started_at": 100, "ended_at": 1000}
-        with patch.object(client, "tableware_events", return_value=[]), patch.object(client, "get", side_effect=get):
+        candidate = {"candidate_id": "synthetic-meal", "subject": "test-camera", "started_at": 100, "ended_at": 1000}
+        with patch.object(client, "object_events", return_value=[]), patch.object(client, "get", side_effect=get):
             result = client.composite(candidate)
-        self.assertEqual(result["evidence_version"], "tableware-diversity-v3")
+        self.assertEqual(result["evidence_version"], "historical-diversity-v1")
         self.assertEqual(len(result["frames"]), 12)
         self.assertEqual(len(result["images"]), 3)
         self.assertEqual([f["frame_id"] for f in result["frames"]], [f"F{i:02d}" for i in range(1,13)])
@@ -206,8 +206,8 @@ class EvidenceTests(unittest.TestCase):
     def test_deadline_returns_partial_coverage_without_more_fetches(self):
         client = FrigateEvidence("https://proxy.example/service", "key", "test-camera")
         blob = BytesIO();Image.new("RGB", (320, 180), "white").save(blob,"JPEG")
-        candidate = {"meal_id": "synthetic-meal", "camera": "test-camera", "started_at": 100, "ended_at": 1000}
-        with patch.object(client, "tableware_events", return_value=[]), \
+        candidate = {"candidate_id": "synthetic-meal", "subject": "test-camera", "started_at": 100, "ended_at": 1000}
+        with patch.object(client, "object_events", return_value=[]), \
                 patch.object(client, "get", return_value=blob.getvalue()) as get, \
                 patch("evidence.time.monotonic", side_effect=[0,1,2,3,36]):
             result = client.composite(candidate)

@@ -3,19 +3,32 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from evidence import EvidenceOptions
+from pipeline import Pipeline
 
 
 def render(image, service, environ):
     required = ("CAMERA", "SEATS_ZONE", "TABLE_ZONE", "EVENT_SOURCE")
-    if any(not environ.get(key) for key in required):
+    document, file = environ.get("PIPELINE_CONFIG_JSON"), environ.get("PIPELINE_CONFIG_FILE")
+    if document and file:
+        raise ValueError("Provide one pipeline configuration source")
+    pipeline = Pipeline.parse(json.loads(Path(file).read_text() if file else document)) if document or file else None
+    if pipeline is None and any(not environ.get(key) for key in required):
         raise ValueError("Required parameters: " + ", ".join(required))
     names = required + ("TIMEZONE", "PROVIDER_SLUG", "WORKER_NAME", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
                         "MINIMUM_SECONDS", "MAXIMUM_SECONDS", "COOLDOWN_SECONDS", "MAX_PER_DAY",
                         "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_EVENT_URL", "CMA_HMAC_KEY_ID",
-                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "EVIDENCE_SERVICE",
-                        "EVIDENCE_CROP_PADDING", "EVIDENCE_MAX_WIDTH", "EVIDENCE_MAX_HEIGHT", "EVIDENCE_JPEG_QUALITY",
-                        "EVIDENCE_SAMPLE_FRAMES", "EVIDENCE_SELECTED_FRAMES", "EVIDENCE_BURST_SECONDS", "EVIDENCE_SAMPLING_SECONDS")
+                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "EVIDENCE_SERVICE", "WORKER_SERVICE")
+    names += tuple("EVIDENCE_" + name.upper() for name in EvidenceOptions.__dataclass_fields__)
     env = {key: environ[key] for key in names if key in environ}
+    if pipeline is not None:
+        for name in ("CAMERA", "SEATS_ZONE", "TABLE_ZONE", "TIMEZONE", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
+                     "MINIMUM_SECONDS", "MAXIMUM_SECONDS", "COOLDOWN_SECONDS", "MAX_PER_DAY", "EVENT_SOURCE"):
+            env.pop(name, None)
+        env["PIPELINE_CONFIG_JSON"] = json.dumps(pipeline.spec, separators=(",", ":"), ensure_ascii=False)
     env["DATA_DIR"] = "/data"
     service_spec = {
         "image": image, "port": 8080, "health_path": "/healthz", "replicas": 1,
@@ -24,8 +37,10 @@ def render(image, service, environ):
         "volumes": [{"name": "event-state", "mount_path": "/data", "type": "pvc", "size": "1Gi"}],
         "resources": {"cpu_request": "50m", "memory_request": "128Mi", "cpu_limit": "500m", "memory_limit": "256Mi"}}
     result = {"services": {service: service_spec}}
-    if environ.get("FRIGATE_PROXY_URL"):
-        service_spec["secret_keys"] += ["FRIGATE_API_KEY", "EVIDENCE_TOKEN"]
+    if environ.get("FRIGATE_PROXY_URL") and (pipeline is None or pipeline.spec["evidence"]["adapter"] == "frigate"):
+        service_spec["secret_keys"] += ["FRIGATE_API_KEY", "WORKER_TOKEN" if environ.get("WORKER_SERVICE") else "EVIDENCE_TOKEN"]
+    elif environ.get("WORKER_SERVICE"):
+        service_spec["secret_keys"] += ["WORKER_TOKEN"]
     if environ.get("PERSISTENCE_BACKEND") == "mongodb":
         result["addons"] = {"mongodb": {}}
         service_spec.pop("volumes")

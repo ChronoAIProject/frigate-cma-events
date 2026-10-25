@@ -1,6 +1,7 @@
 # Cloud deployment
 
-For the complete **HA relay → aggregation → CMA worker → Google Sheets**
+Choose a [pipeline example](../README.md#examples) and supply its configuration
+at deployment. For the complete **HA relay → aggregation → CMA worker → Google Sheets**
 application, follow [the dining walkthrough](../examples/dining/README.md).
 It generates the app, relay, worker/channel and Sheet configuration from one
 private parameter set. The normal application uses CMA's existing `cma_codex`
@@ -9,8 +10,11 @@ provider; it does not need a new provider registry entry.
 ## App spec and secrets
 
 1. Publish the image from this repository and ensure the GHCR package is public.
-2. Set all site parameters in the deployment environment. Generate distinct
-   `PROVIDER_TOKEN` and `API_TOKEN` values and keep them in private secret files.
+2. Copy an example policy outside the checkout and set `PIPELINE_CONFIG_FILE`
+   to its absolute path (or supply `PIPELINE_CONFIG_JSON`). Configure its source,
+   subjects, conditions, windows, output and optional evidence adapter. These
+   variables are mutually exclusive. Generate distinct `PROVIDER_TOKEN`,
+   `API_TOKEN` and `RELAY_TOKEN` values and keep them in private secret files.
 3. Render the app spec **outside the checkout**:
 
    ```sh
@@ -18,8 +22,11 @@ provider; it does not need a new provider registry entry.
      --service SERVICE --output /private/path/app-spec.json
    ```
 
-   `CAMERA`, `SEATS_ZONE`, `TABLE_ZONE` and `EVENT_SOURCE` are required. Other
-   optional rule/timer variables are copied when present. For downstream CMA
+   The renderer validates and embeds the resolved policy in the app spec;
+   the file does not need mounting. Generic policies do not require camera or
+   dining variables. Legacy deployments may still use `CAMERA`, `SEATS_ZONE`,
+   `TABLE_ZONE` and `EVENT_SOURCE`; see [migration](../docs/pipeline.md#existing-dining-installations)
+   before replacing those settings on existing state. For downstream CMA
    delivery also set `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID`, and mount the matching
    `CMA_HMAC_SECRET`; the renderer copies only the URL/key-id parameters and the
    secret name. Set `WORKER_NAME` to a non-sensitive public agent-card display
@@ -31,7 +38,9 @@ provider; it does not need a new provider registry entry.
    `api/v1/projects/PROJECT/apps/APP/services/SERVICE/secrets?org_id=ORG_ID`.
    The app waits for its declared secrets. With the evidence adapter, these are
    `PROVIDER_TOKEN`, `API_TOKEN`, `RELAY_TOKEN`, `CMA_HMAC_SECRET`,
-   `FRIGATE_API_KEY` and `EVIDENCE_TOKEN`. Verify platform application status and
+   `FRIGATE_API_KEY` and `EVIDENCE_TOKEN`. A metadata-only worker callback instead
+   uses `WORKER_SERVICE` and its separate `WORKER_TOKEN`; neither images nor a
+   Frigate API key are required. Verify platform application status and
    the live `/healthz` and authenticated `/api/status` endpoints.
 5. On an isolated test deployment, run the synthetic provider smoke test with
    evidence/CMA delivery disabled. Restart through chrono-cd, then run
@@ -83,7 +92,7 @@ worker application, and keep custom provider experiments on isolated test state.
 
 - Public app readiness means the container and edge are reachable.
 - Successful provider smoke tests mean the HTTP contract and persistence work.
-- Neither establishes provider registration, MQTT connectivity or real meal
-  recognition. Verify those independently before activating real events.
+- Neither establishes provider registration, MQTT connectivity or useful
+  real-world recognition. Verify those independently before activating real events.
 - CMA 2xx delivery proves admission, not model completion or a Sheet write.
-  Read `/api/results/{meal_id}` and independently verify the resulting row.
+  Read `/api/results/{candidate_id}` and independently verify the downstream result.

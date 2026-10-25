@@ -1,60 +1,28 @@
-"""Deterministic review-event aggregation for a CMA-compatible consumer.
+"""Deterministic policy-driven event windows for a CMA-compatible consumer.
 
 This module makes no HTTP requests, reads no images, and calls no models.
 HTTP admission and CMA lifecycle endpoints live in service.py.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
-import math
 from pathlib import Path
 import sqlite3
 import uuid
 from zoneinfo import ZoneInfo
 
-
-@dataclass(frozen=True)
-class Rules:
-    camera: str
-    seats_zone: str
-    table_zone: str
-    merge_seconds: int = 300
-    delivery_grace_seconds: int = 60
-    minimum_seconds: int = 480
-    maximum_seconds: int = 14400
-    cooldown_seconds: int = 3600
-    max_per_day: int = 3
-    timezone: str = "UTC"
-
-    def __post_init__(self):
-        ZoneInfo(self.timezone)
-        if not (0 < self.minimum_seconds < self.maximum_seconds):
-            raise ValueError("Invalid duration limits")
-        if min(self.merge_seconds, self.delivery_grace_seconds, self.cooldown_seconds, self.max_per_day) <= 0:
-            raise ValueError("Limits must be positive")
-
-
-def wrap_review(message, source):
-    """Translate a frigate/reviews MQTT payload into a stable CloudEvent.
-
-    Same payload on redelivery => same event id. Distinct updates of one review
-    keep distinct ids, while sharing the camera subject for CMA partitioning.
-    The relay must persist this exact envelope for ambiguous-send recovery.
-    """
-    body = json.dumps(message, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    review = message["after"]
-    return {"specversion": "1.0", "source": source,
-            "id": str(uuid.uuid5(uuid.NAMESPACE_URL, source + "\n" + body)),
-            "type": "frigate.review." + message["type"],
-            "subject": review["camera"], "datacontenttype": "application/json", "data": message}
+from adapters import Adapter, wrap_review
+from pipeline import Pipeline, matches, number as _number
+from profiles import Rules  # Compatibility import for existing callers.
 
 
 class Aggregator:
     def __init__(self, database, rules):
         self.rules = rules
+        self.policy = rules.pipeline() if isinstance(rules, Rules) else rules
+        self.adapter = Adapter(self.policy)
         self.db = sqlite3.connect(database, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.row_factory = sqlite3.Row
@@ -73,33 +41,25 @@ class Aggregator:
         """)
 
     def ingest(self, event, received_at):
-        if event.get("specversion") != "1.0" or not event.get("source") or not event.get("id"):
+        if (event.get("specversion") != "1.0" or not isinstance(event.get("source"), str)
+                or not event["source"] or not isinstance(event.get("id"), str) or not 1 <= len(event["id"]) <= 512):
             raise ValueError("Invalid CloudEvent identity")
-        phase = event.get("type", "").removeprefix("frigate.review.")
-        if phase not in {"new", "update", "end"}:
-            raise ValueError("Only Frigate review lifecycle events are accepted")
-        message = event.get("data", {})
-        if message.get("type") != phase:
-            raise ValueError("CloudEvent and Frigate event types disagree")
-        review = message.get("after", {})
-        if review.get("camera") != self.rules.camera or event.get("subject") != self.rules.camera:
-            return "other_camera"
-        start, end = review.get("start_time"), review.get("end_time")
+        source = self.policy.spec["source"]["source"]
+        if source and event["source"] != source:
+            raise ValueError("Event source does not match pipeline")
+        normalized = self.adapter.normalize(event)
+        if normalized is None:
+            return "other_camera" if isinstance(self.rules, Rules) else "filtered"
+        phase, start, end = normalized["phase"], normalized["start"], normalized["end"]
         if not _number(start) or not _number(received_at) or (end is not None and not _number(end)):
             raise ValueError("Invalid timestamp")
         if start > received_at + 60 or (end is not None and (end < start or end > received_at + 60)):
             raise ValueError("Invalid event time range")
-        if (phase == "end") != (end is not None):
+        if phase not in {"new", "update", "end"} or (phase == "end") != (end is not None):
             raise ValueError("An end event needs an explicit end_time")
-        if not isinstance(review.get("id"), str) or not review["id"]:
-            raise ValueError("Missing review id")
-        data = review.get("data", {})
-        if not isinstance(data, dict) or not all(isinstance(data.get(k, []), list) for k in ("objects", "zones", "detections")):
-            raise ValueError("Invalid review data")
-        if not all(isinstance(x, str) for k in ("objects", "zones", "detections") for x in data.get(k, [])):
-            raise ValueError("Invalid review data values")
-        data = dict(data)
-        severity = review.get("severity")
+        identity, data = normalized["id"], normalized["data"]
+        if not isinstance(identity, str) or not identity or len(identity) > 512:
+            raise ValueError("Missing record id")
         digest = hashlib.sha256(json.dumps(event, sort_keys=True, allow_nan=False).encode()).hexdigest()
         key = json.dumps([event["source"], event["id"]])
         with self.transaction():
@@ -109,7 +69,7 @@ class Aggregator:
                     raise ValueError("An event identity was reused with different content")
                 return "duplicate"
             self.db.execute("INSERT INTO receipts VALUES(?,?)", (key, digest))
-            old = self.db.execute("SELECT * FROM reviews WHERE id=?", (review["id"],)).fetchone()
+            old = self.db.execute("SELECT * FROM reviews WHERE id=?", (identity,)).fetchone()
             if old:
                 if start != old["start"]:
                     raise ValueError("Review start_time changed")
@@ -120,13 +80,9 @@ class Aggregator:
                 if phase == "end" and old["end"] is not None and end != old["end"]:
                     raise ValueError("Review end_time changed")
                 end = old["end"] if old["end"] is not None else end
-                for field in ("objects", "zones", "detections"):
-                    data[field] = sorted(set(previous["data"].get(field, [])) | set(data.get(field, [])))
-                if previous.get("severity") == "alert":
-                    severity = "alert"
-            normalized = {"id": review["id"], "camera": review["camera"], "severity": severity, "data": data}
+                data = self.adapter.merge(previous, data)
             self.db.execute("INSERT OR REPLACE INTO reviews VALUES(?,?,?,?,?,0)",
-                            (review["id"], start, end, received_at, json.dumps(normalized)))
+                            (identity, start, end, received_at, json.dumps(data)))
         return "stored"
 
     def flush(self, now, *, source_healthy=False):
@@ -139,18 +95,20 @@ class Aggregator:
             return []
         if not _number(now):
             raise ValueError("Invalid flush time")
-        cfg = self.rules
+        cfg = self.policy
         rows = list(self.db.execute("SELECT * FROM reviews WHERE consumed=0 ORDER BY start,id"))
-        groups = []
+        partitions = {}
         for row in rows:
+            subject = self.adapter.subject(json.loads(row["data"]))
+            groups = partitions.setdefault(subject, [])
             if groups and (groups[-1]["end"] is None or row["start"] - groups[-1]["end"] <= cfg.merge_seconds):
                 group = groups[-1]
                 group["rows"].append(row)
                 group["end"] = None if group["end"] is None or row["end"] is None else max(group["end"], row["end"])
             else:
-                groups.append({"rows": [row], "start": row["start"], "end": row["end"]})
+                groups.append({"rows": [row], "start": row["start"], "end": row["end"], "subject": subject})
         finalized = []
-        for group in groups:
+        for group in [g for groups in partitions.values() for g in groups]:
             if (group["end"] is None or now - group["end"] < cfg.merge_seconds
                     or now - max(r["received"] for r in group["rows"]) < cfg.delivery_grace_seconds):
                 continue
@@ -158,42 +116,60 @@ class Aggregator:
         return finalized
 
     def _decide(self, group, now):
-        cfg = self.rules
-        reviews = [json.loads(row["data"]) for row in group["rows"]]
-        seated = [(row["start"], row["end"]) for row, review in zip(group["rows"], reviews, strict=True)
-                  if review["severity"] == "alert" and cfg.seats_zone in review["data"].get("zones", [])
-                  and "person" in review["data"].get("objects", [])]
-        duration = _union_duration(seated)
-        tableware = any(cfg.table_zone in r["data"].get("zones", [])
-                        and {"plate", "bowl", "cup", "bottle"}.intersection(r["data"].get("objects", []))
-                        for r in reviews)
+        cfg = self.policy.spec
+        attrs = [self.adapter.attributes(json.loads(row["data"])) for row in group["rows"]]
+        conditions = {}
+        for condition in [cfg["activity"], *cfg["requirements"]]:
+            selected = [row for row, values in zip(group["rows"], attrs, strict=True) if matches(values, condition["match"])]
+            seconds = _union_duration([(row["start"], row["end"]) for row in selected])
+            conditions[condition["name"]] = {"matched": len(selected) >= condition["minimum_events"] and seconds >= condition["minimum_seconds"],
+                                              "seconds": round(seconds, 2), "events": len(selected)}
+        activity = conditions[cfg["activity"]["name"]]
         reason = "candidate"
-        day = datetime.fromtimestamp(now, ZoneInfo(cfg.timezone)).date().isoformat()
-        last = self.db.execute("SELECT max(at) FROM decisions WHERE reason='candidate'").fetchone()[0]
-        count = self.db.execute("SELECT count(*) FROM decisions WHERE reason='candidate' AND day=?", (day,)).fetchone()[0]
-        if duration < cfg.minimum_seconds:
-            reason = "short_or_non_dining_activity"
-        elif group["end"] - group["start"] > cfg.maximum_seconds:
+        day = datetime.fromtimestamp(now, ZoneInfo(cfg["limits"]["timezone"])).date().isoformat()
+        subject_alias = next((k for k,v in cfg["output"]["aliases"].items() if v == "subject"), "subject")
+        scope = ("$." + subject_alias, group["subject"])
+        where = "reason='candidate' AND COALESCE(json_extract(payload,'$.subject'),json_extract(payload,?))=?"
+        last = self.db.execute("SELECT max(at) FROM decisions WHERE " + where, scope).fetchone()[0]
+        count = self.db.execute("SELECT count(*) FROM decisions WHERE " + where + " AND day=?", (*scope,day)).fetchone()[0]
+        if not activity["matched"]:
+            reason = cfg["activity"]["reason"]
+        elif group["end"] - group["start"] > cfg["window"]["maximum_seconds"]:
             reason = "activity_too_long"
-        elif not tableware:
-            reason = "no_tableware_evidence"
-        elif last is not None and now - last < cfg.cooldown_seconds:
+        elif any(not conditions[c["name"]]["matched"] for c in cfg["requirements"]):
+            reason = next(c["reason"] for c in cfg["requirements"] if not conditions[c["name"]]["matched"])
+        elif last is not None and now - last < cfg["limits"]["cooldown_seconds"]:
             reason = "cooldown"
-        elif count >= cfg.max_per_day:
+        elif count >= cfg["limits"]["max_per_day"]:
             reason = "daily_limit"
-        ids = [r["id"] for r in reviews]
-        meal_id = str(uuid.uuid5(uuid.NAMESPACE_URL, cfg.camera + "/" + "/".join(sorted(ids))))
-        payload = {"schema": "dining-review-candidate.v1", "meal_id": meal_id,
-                   "camera": cfg.camera, "decision": reason, "review_ids": ids,
+        ids = [r["id"] for r in group["rows"]]
+        prefix = cfg["output"]["id_prefix"] or cfg["name"] + "/" + cfg["source"]["source"] + "/" + group["subject"]
+        identity = str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + "/".join(sorted(ids))))
+        sample_count = min(len(ids), cfg["output"]["metadata_records"])
+        samples, exported_bytes = [], 0
+        indexes = sorted({round(i * (len(ids)-1) / max(1, sample_count-1)) for i in range(sample_count)})
+        for index in indexes:
+            row = group["rows"][index]
+            stored = json.loads(row["data"])
+            sample = {"record_id": row["id"], "source_event_ids": stored.get("source_event_ids", []),
+                      "started_at": row["start"], "ended_at": row["end"], "attributes": attrs[index]}
+            size = len(json.dumps(sample, allow_nan=False).encode())
+            if exported_bytes + size > 65536:
+                break
+            samples.append(sample)
+            exported_bytes += size
+        payload = {"schema": cfg["output"]["schema"], "candidate_id": identity,
+                   "subject": group["subject"], "decision": reason, "event_ids": ids[:cfg["output"]["max_event_ids"]],
                    "started_at": group["start"], "ended_at": group["end"],
-                   "alert_interval_seconds": round(duration, 2), "tableware_seen": tableware,
-                   "review_count": len(ids), "images": [],
-                   "evidence_budget": {"max_model_turns": 1, "max_images": 1, "max_source_frames": 3},
-                   "cautions": ["Candidate activity, not a confirmed meal.",
-                                "Review intervals and zones do not measure continuous seat occupancy.",
-                                "No image was viewed. Food, leftovers and clearing are unverified."]}
+                   "activity_seconds": activity["seconds"], "conditions": conditions,
+                   "event_count": len(ids), "records": samples, "metadata_truncated": len(samples) < len(ids),
+                   "images": [], "evidence_budget": cfg["output"]["budget"],
+                   "cautions": list(cfg["output"]["cautions"])}
+        if cfg["source"]["health"]["mode"] == "observed_events":
+            payload["cautions"].append("Only received point events are summarized; source continuity is unverified.")
+        payload = self.policy.aliases(payload)
         with self.transaction():
-            self.db.execute("INSERT INTO decisions VALUES(?,?,?,?,?)", (meal_id, now, day, reason, json.dumps(payload)))
+            self.db.execute("INSERT INTO decisions VALUES(?,?,?,?,?)", (identity, now, day, reason, json.dumps(payload)))
             self.db.executemany("UPDATE reviews SET consumed=1 WHERE id=?", [(i,) for i in ids])
         return payload
 
@@ -207,10 +183,6 @@ class Aggregator:
 
     def close(self):
         self.db.close()
-
-
-def _number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _union_duration(intervals):
@@ -237,12 +209,41 @@ def replay(path, rules):
         engine.close()
 
 
+def replay_events(events, pipeline, now=None):
+    """Isolated replay of generic CloudEvents; no delivery or persistent writes."""
+    if not isinstance(events, list) or not 1 <= len(events) <= 100:
+        raise ValueError("Replay requires 1..100 events")
+    engine = Aggregator(":memory:", pipeline)
+    observed = []
+    try:
+        for event in events:
+            normalized = engine.adapter.normalize(event)
+            if normalized is None:
+                continue
+            received = normalized["end"] if normalized["end"] is not None else normalized["start"]
+            engine.ingest(event, received)
+            observed.append(received)
+        if not observed:
+            return []
+        clock = max(observed) + max(pipeline.merge_seconds, pipeline.delivery_grace_seconds) + 1 if now is None else now
+        return engine.flush(clock, source_healthy=True)
+    finally:
+        engine.close()
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Offline review-event aggregation replay; no event delivery")
     parser.add_argument("reviews_json")
-    parser.add_argument("--camera", required=True)
-    parser.add_argument("--seats-zone", required=True)
-    parser.add_argument("--table-zone", required=True)
+    parser.add_argument("--pipeline", type=Path)
+    parser.add_argument("--camera")
+    parser.add_argument("--seats-zone")
+    parser.add_argument("--table-zone")
     args = parser.parse_args()
-    print(json.dumps(replay(args.reviews_json, Rules(camera=args.camera, seats_zone=args.seats_zone, table_zone=args.table_zone)), ensure_ascii=False, indent=2))
+    if args.pipeline:
+        result = replay_events(json.loads(Path(args.reviews_json).read_text()), Pipeline.parse(json.loads(args.pipeline.read_text())))
+    else:
+        if not all((args.camera, args.seats_zone, args.table_zone)):
+            parser.error("Provide --pipeline or all legacy camera/zone arguments")
+        result = replay(args.reviews_json, Rules(camera=args.camera, seats_zone=args.seats_zone, table_zone=args.table_zone))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
