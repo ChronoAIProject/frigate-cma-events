@@ -129,6 +129,7 @@ bearer authentication; installation details are never in public health output.
 | `POST /results/{candidate_id}` | Worker | Configured string status/result fields |
 | `GET /api/results/{candidate_id}` | Operator | Reported analysis result |
 | `POST /api/validation` | Operator | Explicit one-frame Frigate integration validation |
+| `GET /api/state/export` | Operator, processing paused | Portable state snapshot for offline migration |
 
 Callbacks are worker reports, not independent proof of external writes. Their
 allowed statuses/fields come from `output`. Application workers must verify
@@ -160,3 +161,26 @@ allows an equivalent legacy dining installation to adopt explicit configuration
 while preserving IDs, decisions, receipts, outbox and results.
 
 Licensed under Apache-2.0.
+
+## Home Assistant deployment
+
+The [CMA Event Pipeline add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline)
+runs this same image/core beside HA Event Relay and Frigate. It stores SQLite in
+the add-on's persistent `/data`, without MongoDB or Supervisor administration
+permission. A NyxID node exposes only the configured worker service; no host port
+is published. Only selected historical evidence leaves the local network.
+
+For a direct local source, set `FRIGATE_URL` to the trusted Frigate base URL
+(HTTP or HTTPS); optional `FRIGATE_API_KEY` is sent only when configured. Existing
+cloud deployments retain HTTPS-only `FRIGATE_PROXY_URL`. Do not set both.
+
+For migration, deploy with `PROCESSING_ENABLED=false` on the source. Ingestion,
+provider turns, model-result callbacks and explicit validation return 503;
+aggregation and delivery stop, while operator reads/export remain available.
+The relay's durable outbox retries. Export `/api/state/export`, then restore via
+`state_transfer.restore_state` before starting the destination. The add-on can
+fetch that export once from a configured HTTPS URL using the operator token.
+Restore validates schema, source, policy digest, checksums and SQLite integrity,
+and refuses an existing database. Keep the source paused until the destination
+is verified; run only one writer. Preserve the original worker-service identity
+when moving its endpoint, and retain a private export for rollback.

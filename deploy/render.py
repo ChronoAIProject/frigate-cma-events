@@ -21,7 +21,7 @@ def render(image, service, environ):
     names = required + ("TIMEZONE", "PROVIDER_SLUG", "WORKER_NAME", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS",
                         "MINIMUM_SECONDS", "MAXIMUM_SECONDS", "COOLDOWN_SECONDS", "MAX_PER_DAY",
                         "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_EVENT_URL", "CMA_HMAC_KEY_ID",
-                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "EVIDENCE_SERVICE", "WORKER_SERVICE")
+                        "CMA_TIMEOUT_SECONDS", "FRIGATE_PROXY_URL", "FRIGATE_URL", "PROCESSING_ENABLED", "EVIDENCE_SERVICE", "WORKER_SERVICE")
     names += tuple("EVIDENCE_" + name.upper() for name in EvidenceOptions.__dataclass_fields__)
     env = {key: environ[key] for key in names if key in environ}
     if pipeline is not None:
@@ -37,7 +37,7 @@ def render(image, service, environ):
         "volumes": [{"name": "event-state", "mount_path": "/data", "type": "pvc", "size": "1Gi"}],
         "resources": {"cpu_request": "50m", "memory_request": "128Mi", "cpu_limit": "500m", "memory_limit": "256Mi"}}
     result = {"services": {service: service_spec}}
-    if environ.get("FRIGATE_PROXY_URL") and (pipeline is None or pipeline.spec["evidence"]["adapter"] == "frigate"):
+    if (environ.get("FRIGATE_PROXY_URL") or environ.get("FRIGATE_URL")) and (pipeline is None or pipeline.spec["evidence"]["adapter"] == "frigate"):
         service_spec["secret_keys"] += ["FRIGATE_API_KEY", "WORKER_TOKEN" if environ.get("WORKER_SERVICE") else "EVIDENCE_TOKEN"]
     elif environ.get("WORKER_SERVICE"):
         service_spec["secret_keys"] += ["WORKER_TOKEN"]

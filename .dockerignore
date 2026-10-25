@@ -9,6 +9,7 @@
 !pipeline.py
 !adapters.py
 !profiles.py
+!state_transfer.py
 !examples/
 !examples/dining/
 !examples/dining/pipeline.example.json

@@ -200,9 +200,9 @@ def select_diverse_frames(records, limit, options=None):
 
 class FrigateEvidence:
     def __init__(self, proxy_url, key, camera, crop_zone="", options=None, *, labels=(),
-                 version="historical-diversity-v1", cautions=(), aliases=None):
+                 version="historical-diversity-v1", cautions=(), aliases=None, allow_http=False):
         url = urlsplit(proxy_url)
-        if (url.scheme != "https" or not url.hostname or url.username or url.password
+        if (url.scheme not in ({"http", "https"} if allow_http else {"https"}) or not url.hostname or url.username or url.password
                 or url.query or url.fragment):
             raise ValueError("FRIGATE_PROXY_URL must be an HTTPS service proxy URL")
         self.url, self.key, self.camera = proxy_url.rstrip("/"), key, camera
@@ -213,8 +213,10 @@ class FrigateEvidence:
         self.opener = build_opener(NoRedirect)
 
     def get(self, path, limit=2 * 1024 * 1024, timeout=15):
-        request = Request(self.url + "/" + path, headers={
-            "Authorization": "Bearer " + self.key, "User-Agent": "frigate-cma-events/0.2"})
+        headers = {"User-Agent": "frigate-cma-events/0.2"}
+        if self.key:
+            headers["Authorization"] = "Bearer " + self.key
+        request = Request(self.url + "/" + path, headers=headers)
         try:
             with self.opener.open(request, timeout=timeout) as response:
                 raw = response.read(limit + 1)

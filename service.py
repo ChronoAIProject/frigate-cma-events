@@ -85,7 +85,7 @@ class State:
         self.evidence = (FrigateEvidence(config.frigate_proxy_url, config.frigate_api_key, self.pipeline.subject,
                                         media["crop_zone"], config.evidence_options, labels=media["labels"],
                                         version=media["version"], cautions=media["cautions"],
-                                        aliases=self.pipeline.spec["output"]["aliases"])
+                                        aliases=self.pipeline.spec["output"]["aliases"], allow_http=config.frigate_direct)
                          if config.frigate_proxy_url and media["adapter"] == "frigate" else None)
         self.evidence_cache = {}
         self.evidence_busy = False
@@ -275,6 +275,8 @@ class State:
             raise Problem(400, "invalid_source_event") from None
 
     def ingest_relay(self, event):
+        if not self.config.processing_enabled:
+            raise Problem(503, "processing_paused")
         engine = self._relay_engine()
         with engine.db:
             result = self._ingest(engine, event, time.time())
@@ -314,6 +316,8 @@ class State:
             return False
 
     def admit(self, body, key):
+        if not self.config.processing_enabled:
+            raise Problem(503, "processing_paused")
         if not key or len(key) > 256 or not key.isascii() or not key.isprintable():
             raise Problem(400, "idempotency_key_required")
         conversation = body.get("conversation")
@@ -456,6 +460,8 @@ class State:
                 self.persist(engine)
 
     def flush(self):
+        if not self.config.processing_enabled:
+            return 0
         now = time.time()
         delivery_engines = []
         with self.lock:
@@ -515,7 +521,7 @@ def create_app(config=None):
                 pass
             app.state.worker.close()
 
-    app = FastAPI(title="CMA Event Pipeline", version="0.2.0", lifespan=lifespan,
+    app = FastAPI(title="CMA Event Pipeline", version="0.2.1", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -558,7 +564,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.2.0", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.2.1", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")
@@ -610,6 +616,8 @@ def create_app(config=None):
     @app.post("/results/{candidate_id}")
     async def analysis_result(candidate_id: str, request: Request):
         state = evidence_authorize(request)
+        if not state.config.processing_enabled:
+            raise Problem(503, "processing_paused")
         value = await body(request)
         output = state.pipeline.spec["output"]
         if set(value) - {"status", *output["result_fields"]} or value.get("status") not in output["result_statuses"]:
@@ -629,6 +637,8 @@ def create_app(config=None):
     @app.post("/api/validation")
     def validation(request: Request):
         state = authorize(request, operator=True)
+        if not state.config.processing_enabled:
+            raise Problem(503, "processing_paused")
         if not state.evidence:
             raise Problem(503, "evidence_disabled")
         with state.lock:
@@ -772,6 +782,24 @@ def create_app(config=None):
         return {"pipeline": state.pipeline.spec, "state_digest": digest(state.pipeline.state_document()),
                 "evidence_options": {name: getattr(state.config.evidence_options, name)
                                      for name in state.config.evidence_options.__dataclass_fields__}}
+
+    @app.get("/api/state/export")
+    def export_state(request: Request):
+        state = authorize(request, operator=True)
+        if state.config.processing_enabled:
+            raise Problem(409, "pause_processing_before_export")
+        with state.lock:
+            databases = []
+            for binding, engine in sorted(state.engines.items()):
+                raw = engine.db.serialize()
+                if len(raw) > 12 * 1024 * 1024:
+                    raise Problem(413, "state_too_large")
+                databases.append({"binding": binding, "sha256": hashlib.sha256(raw).hexdigest(),
+                                  "sqlite_base64": base64.b64encode(raw).decode("ascii")})
+            if sum(len(row["sqlite_base64"]) for row in databases) > 20 * 1024 * 1024:
+                raise Problem(413, "state_too_large")
+            return {"schema": "event-pipeline-state.v1", "source": state.config.event_source,
+                    "policy_digest": digest(state.pipeline.state_document()), "databases": databases}
 
     return app
 

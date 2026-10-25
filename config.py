@@ -36,6 +36,8 @@ class Config:
     evidence_token: str = ""
     evidence_service: str = ""
     evidence_options: EvidenceOptions = EvidenceOptions()
+    frigate_direct: bool = False
+    processing_enabled: bool = True
 
     @property
     def pipeline(self):
@@ -75,6 +77,12 @@ class Config:
             value = os.environ.get("EVIDENCE_" + field.name.upper())
             if value is not None:
                 evidence_options[field.name] = int(value) if isinstance(getattr(EvidenceOptions(), field.name), int) else float(value)
+        direct_url = os.environ.get("FRIGATE_URL", "").strip()
+        if direct_url and os.environ.get("FRIGATE_PROXY_URL", "").strip():
+            raise ValueError("Use FRIGATE_URL or FRIGATE_PROXY_URL, not both")
+        processing = os.environ.get("PROCESSING_ENABLED", "true")
+        if processing not in {"true", "false"}:
+            raise ValueError("PROCESSING_ENABLED must be true or false")
         config = cls(
             rules=rule, data_dir=Path(os.environ.get("DATA_DIR", "/data")),
             provider_token=secret("PROVIDER_TOKEN"), api_token=secret("API_TOKEN"),
@@ -91,7 +99,8 @@ class Config:
             cma_hmac_key_id=os.environ.get("CMA_HMAC_KEY_ID", "").strip(),
             cma_hmac_secret=secret("CMA_HMAC_SECRET"),
             cma_timeout_seconds=float(os.environ.get("CMA_TIMEOUT_SECONDS", "8")),
-            frigate_proxy_url=os.environ.get("FRIGATE_PROXY_URL", "").strip(),
+            frigate_proxy_url=direct_url or os.environ.get("FRIGATE_PROXY_URL", "").strip(),
+            frigate_direct=bool(direct_url), processing_enabled=processing == "true",
             frigate_api_key=secret("FRIGATE_API_KEY"),
             evidence_token=secret("WORKER_TOKEN") or secret("EVIDENCE_TOKEN"),
             evidence_service=(os.environ.get("WORKER_SERVICE") or os.environ.get("EVIDENCE_SERVICE", "")).strip(),
@@ -112,7 +121,8 @@ class Config:
         if not 0.5 <= config.cma_timeout_seconds <= 30:
             raise ValueError("CMA_TIMEOUT_SECONDS must be between 0.5 and 30")
         if config.frigate_proxy_url and pipeline.spec["evidence"]["adapter"] == "frigate":
-            if not config.frigate_api_key or len(config.evidence_token) < 32 or not config.evidence_service:
+            if ((not config.frigate_direct and not config.frigate_api_key)
+                    or len(config.evidence_token) < 32 or not config.evidence_service):
                 raise ValueError("Evidence requires FRIGATE_API_KEY, EVIDENCE_TOKEN and EVIDENCE_SERVICE")
         if config.evidence_token and (len(config.evidence_token) < 32 or config.evidence_token in {config.api_token, config.provider_token, config.relay_token}):
             raise ValueError("Use a separate worker/evidence token of at least 32 characters")
