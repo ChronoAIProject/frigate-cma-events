@@ -84,6 +84,7 @@ class State:
                                         config.rules.table_zone, config.evidence_options)
                          if config.frigate_proxy_url else None)
         self.evidence_cache = {}
+        self.evidence_busy = False
         self.snapshots = None
         if config.mongo_uri:
             try:
@@ -351,10 +352,11 @@ class State:
             "data": payload,
         }
         if self.config.evidence_service:
-            event["data"] = {**payload, "evidence": {
+            event["data"] = {**payload, "evidence_budget": (payload["evidence_budget"] if payload.get("test")
+                            else self.config.evidence_options.budget()), "evidence": {
                 "service": self.config.evidence_service, "path": "evidence/" + meal_id,
                 "result_path": "results/" + meal_id,
-                "instructions": "Fetch this JSON once through NyxID into a local file; decode image_base64 to a JPEG and view it once. Do not print base64. Use only this bounded historical composite, never raw Frigate or live images. Write/read back the configured Sheets row, deduplicated by meal_id; then POST a JSON result with status, sheet_range and uncertainty to result_path using the same service. integration_test is excluded from meals. If evidence is unavailable, report pending rather than inventing observations."}}
+                "instructions": "Fetch this bounded evidence JSON through NyxID into a private file. For v3 decode each images[].image_base64 locally and view each page once, within evidence_budget; never print base64. A 202 pending response or interrupted download may be retried at most 6 times after 5 seconds; cached retrieval does not resample. Frames have IDs and actual timestamps. Match rotating dishes across frames by appearance, never by fixed table position, and avoid duplicate counting. Quality/novelty scores and track counts do not identify food. Activity phases do not establish final leftovers. Never call raw Frigate or live images. Write/read back the configured Sheets row deduplicated by meal_id, then POST status, sheet_range and uncertainty to result_path. integration_test is excluded from meals; unavailable evidence means pending."}}
         with engine.db:
             engine.db.execute(
                 "INSERT OR IGNORE INTO cma_deliveries(event_id,body,created_at,next_attempt_at) VALUES(?,?,?,?)",
@@ -555,17 +557,27 @@ def create_app(config=None):
         state = evidence_authorize(request)
         with state.lock:
             candidate = state.candidate(meal_id)
-            # Only one fixed composite per candidate; small, volatile cache, no media on disk.
+            # A fixed bounded evidence pack per candidate; no source media on disk.
             if meal_id in state.evidence_cache:
                 return state.evidence_cache[meal_id]
+            if state.evidence_busy:
+                return JSONResponse({"status": "pending", "meal_id": meal_id}, status_code=202,
+                                    headers={"Retry-After": "5"})
+            state.evidence_busy = True
+        # Historical extraction must not hold the lock used by live ingestion.
+        try:
             try:
                 result = state.evidence.composite(candidate)
             except EvidenceUnavailable as exc:
                 raise Problem(424, str(exc)) from None
-            while len(state.evidence_cache) >= 4:
-                state.evidence_cache.pop(next(iter(state.evidence_cache)))
-            state.evidence_cache[meal_id] = result
+            with state.lock:
+                while len(state.evidence_cache) >= 4:
+                    state.evidence_cache.pop(next(iter(state.evidence_cache)))
+                state.evidence_cache[meal_id] = result
             return result
+        finally:
+            with state.lock:
+                state.evidence_busy = False
 
     @app.post("/results/{meal_id}")
     async def analysis_result(meal_id: str, request: Request):

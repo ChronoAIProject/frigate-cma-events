@@ -72,7 +72,11 @@ class Config:
                 crop_padding=float(os.environ.get("EVIDENCE_CROP_PADDING", "0.04")),
                 max_width=int(os.environ.get("EVIDENCE_MAX_WIDTH", "1280")),
                 max_height=int(os.environ.get("EVIDENCE_MAX_HEIGHT", "720")),
-                jpeg_quality=int(os.environ.get("EVIDENCE_JPEG_QUALITY", "92"))),
+                jpeg_quality=int(os.environ.get("EVIDENCE_JPEG_QUALITY", "92")),
+                sample_frames=int(os.environ.get("EVIDENCE_SAMPLE_FRAMES", "24")),
+                selected_frames=int(os.environ.get("EVIDENCE_SELECTED_FRAMES", "12")),
+                burst_seconds=float(os.environ.get("EVIDENCE_BURST_SECONDS", "12")),
+                sampling_seconds=float(os.environ.get("EVIDENCE_SAMPLING_SECONDS", "35"))),
         )
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")

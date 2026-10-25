@@ -88,7 +88,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_candidate_is_signed_and_delivered_once_from_durable_outbox(self):
         config = replace(self.config, cma_event_url="https://cma.example/events",
-                         cma_hmac_key_id="dining", cma_hmac_secret="test-secret")
+                         cma_hmac_key_id="dining", cma_hmac_secret="test-secret", evidence_service="synthetic-evidence")
         state = State(config)
         try:
             now = time.time()
@@ -129,6 +129,9 @@ class ServiceTests(unittest.TestCase):
             body = request.data.decode()
             event = json.loads(body)
             self.assertEqual(event["type"], "dining.meal_end_candidate")
+            self.assertEqual(event["data"]["evidence_budget"], {"max_model_turns": 1, "max_images": 3,
+                                                                "max_source_frames": 24, "max_selected_frames": 12})
+            self.assertIn("images[]", event["data"]["evidence"]["instructions"])
             timestamp = request.get_header("Webhook-timestamp")
             signature = request.get_header("Webhook-signature")
             self.assertEqual(signature, cma_signature(config.cma_hmac_secret, event["id"], timestamp, body))

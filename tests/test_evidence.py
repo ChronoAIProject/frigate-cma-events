@@ -1,13 +1,16 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import json
 import time
+import threading
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
-from evidence import EvidenceOptions, EvidenceUnavailable, FrigateEvidence, select_frames
+from evidence import (EvidenceOptions, EvidenceUnavailable, FrigateEvidence, sample_frames,
+                      select_diverse_frames, select_frames, visual_metrics)
 from tests import test_service
 
 
@@ -44,6 +47,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json(), again.json())
         self.assertEqual(len(first.json()["frame_timestamps"]), 1)
+        self.assertEqual(len(first.json()["images"]), 1)
+        self.assertEqual(first.json()["evidence_budget"]["max_source_frames"], 1)
         self.assertEqual(get.call_count, 1)
         self.assertIn("/recordings/", get.call_args.args[0])
         self.assertNotIn("latest", get.call_args.args[0])
@@ -61,7 +66,7 @@ class EvidenceTests(unittest.TestCase):
                 patch.object(client, "get", side_effect=EvidenceUnavailable("missing")) as get:
             with self.assertRaises(EvidenceUnavailable):
                 client.composite(candidate)
-        self.assertEqual(get.call_count, 3)
+        self.assertEqual(get.call_count, 24)
         self.assertTrue(all("/recordings/" in c.args[0] for c in get.call_args_list))
 
     def test_selects_tableware_phases_before_clearing_not_three_end_frames(self):
@@ -99,7 +104,7 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(EvidenceUnavailable):
                 client.tableware_events(100, 300)
 
-    def test_native_table_crop_preserves_detail_and_one_composite_budget(self):
+    def test_native_table_crop_preserves_detail_and_deduplicates_static_views(self):
         client = FrigateEvidence("https://proxy.example/service", "private-key", "test-camera", "table",
                                  EvidenceOptions(crop_padding=0))
         blob = BytesIO()
@@ -114,13 +119,15 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(result["frames"][0]["source_size"], [1920, 1080])
         self.assertEqual(result["frames"][0]["crop_pixels"], [480, 270, 1440, 810])
         self.assertEqual(result["frames"][0]["panel_size"], [960, 540])
-        self.assertTrue(any("evenly spaced" in w for w in result["warnings"]))
+        self.assertTrue(any("interval and burst" in w for w in result["warnings"]))
         images = [c.args[0] for c in request.call_args_list if "/recordings/" in c.args[0]]
-        self.assertEqual(len(images), 3)
+        self.assertEqual(len(images), 24)
         self.assertTrue(all("height=" not in path for path in images))
         import base64
-        with Image.open(BytesIO(base64.b64decode(result["image_base64"]))) as image:
-            self.assertEqual(image.size, (960, 3 * (540 + 28)))
+        self.assertEqual(len(result["images"]), 1)
+        self.assertEqual(result["sampling"], {"planned": 24, "attempted": 24, "available": 24, "selected": 3, "discarded": 21})
+        with Image.open(BytesIO(base64.b64decode(result["images"][0]["image_base64"]))) as image:
+            self.assertEqual(image.size, (1920, 2 * (540 + 28)))
         geometry["cameras"]["test-camera"]["zones"]["table"]["coordinates"] = "0.5,0.5,0.5,0.5,0.5,0.5"
         with patch.object(client, "get", return_value=json.dumps(geometry)), self.assertRaises(EvidenceUnavailable):
             client.table_crop()
@@ -137,8 +144,101 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn("metadata_offline", result["warnings"])
         self.assertIn("table_zone_unavailable", result["warnings"])
         self.assertIsNone(result["crop_normalized"])
-        self.assertEqual(result["frame_timestamps"], [120, 150, 180])
+        self.assertEqual([f["phase"] for f in result["frames"]], ["early", "middle", "late"])
+        self.assertTrue(all(100 <= t <= 200 for t in result["frame_timestamps"]))
         self.assertTrue(all("/recordings/" in c.args[0] for c in get.call_args_list))
+
+    def test_broad_samples_and_rotation_bursts_are_bounded_and_phase_interleaved(self):
+        options = EvidenceOptions()
+        events = [{"start": 100, "end": 1000, "snapshot": 550, "score": 0.8}]
+        samples = sample_frames(0, 1500, events, options)
+        self.assertEqual(len(samples), 24)
+        self.assertEqual([f["phase"] for f in samples[:3]], ["early", "middle", "late"])
+        self.assertEqual(len({round(f["timestamp"], 3) for f in samples}), 24)
+        self.assertTrue(all(100 <= f["timestamp"] <= 1000 for f in samples))
+        for phase in ("early", "middle", "late"):
+            frames = [f for f in samples if f["phase"] == phase]
+            self.assertEqual(sum(f["sampling"] == "interval_coverage" for f in frames), 3)
+            burst = sorted(f["timestamp"] for f in frames if f["sampling"] == "anchor_burst")
+            self.assertEqual([round(b-a) for a, b in zip(burst, burst[1:])], [12] * 4)
+        point = sample_frames(100, 100, [], options)
+        self.assertEqual(len(point), 1)
+
+    def test_visual_selection_rejects_repeats_and_blur_and_keeps_complementary_views(self):
+        panel = Image.new("RGB", (240, 160), "gray")
+        draw = ImageDraw.Draw(panel)
+        for x in range(0, 240, 8):
+            draw.rectangle((x, 20, x+3, 140), fill="white")
+        sharp = visual_metrics(panel)
+        blurred = visual_metrics(panel.filter(ImageFilter.GaussianBlur(8)))
+        self.assertGreater(sharp["focus"], blurred["focus"])
+        records = []
+        for phase in ("early", "middle", "late"):
+            for j, (signature, quality) in enumerate([(b'\x10'*12, 0.8), (b'\x10'*12, 0.8),
+                                                       (b'\x50'*12, 0.8), (b'\x90'*12, 0.8),
+                                                       (b'\xe0'*12, 0.1)]):
+                records.append({"phase": phase, "timestamp": len(records), "tracked_objects": 2,
+                                "quality": quality, "_signature": signature})
+        selected = select_diverse_frames(records, 12)
+        self.assertEqual(len(selected), 9)
+        self.assertTrue(all(r["quality"] == 0.8 for r in selected))
+        self.assertEqual(len({(r["phase"],r["_signature"]) for r in selected}), 9)
+
+    def test_evidence_pack_limits_pages_and_gives_frames_stable_ids(self):
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera")
+        counter = [0]
+        def get(path, **kwargs):
+            counter[0] += 1
+            blob = BytesIO()
+            Image.new("RGB", (320, 180), (counter[0]*10, counter[0]*5, counter[0]*3)).save(blob, "JPEG")
+            return blob.getvalue()
+        candidate = {"meal_id": "synthetic-meal", "camera": "test-camera", "started_at": 100, "ended_at": 1000}
+        with patch.object(client, "tableware_events", return_value=[]), patch.object(client, "get", side_effect=get):
+            result = client.composite(candidate)
+        self.assertEqual(result["evidence_version"], "tableware-diversity-v3")
+        self.assertEqual(len(result["frames"]), 12)
+        self.assertEqual(len(result["images"]), 3)
+        self.assertEqual([f["frame_id"] for f in result["frames"]], [f"F{i:02d}" for i in range(1,13)])
+        self.assertTrue(all(len(page["frame_ids"]) == 4 for page in result["images"]))
+        self.assertEqual(result["evidence_budget"]["max_source_frames"], 24)
+        self.assertEqual(counter[0], 24)
+
+    def test_deadline_returns_partial_coverage_without_more_fetches(self):
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera")
+        blob = BytesIO();Image.new("RGB", (320, 180), "white").save(blob,"JPEG")
+        candidate = {"meal_id": "synthetic-meal", "camera": "test-camera", "started_at": 100, "ended_at": 1000}
+        with patch.object(client, "tableware_events", return_value=[]), \
+                patch.object(client, "get", return_value=blob.getvalue()) as get, \
+                patch("evidence.time.monotonic", side_effect=[0,1,2,3,36]):
+            result = client.composite(candidate)
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(result["sampling"]["attempted"], 3)
+        self.assertEqual(len(result["frames"]), 3)
+        self.assertTrue(any("budget exhausted" in w for w in result["warnings"]))
+
+    def test_slow_evidence_does_not_block_ingestion_or_start_duplicate_sampling(self):
+        state = self.enable()
+        candidate = {"meal_id":"synthetic-candidate", "camera":"test-camera"}
+        started, release = threading.Event(), threading.Event()
+        def slow(_):
+            started.set()
+            if not release.wait(2): raise AssertionError("Test did not release extraction")
+            return {"images":[],"meal_id":candidate["meal_id"]}
+        with patch.object(state, "candidate", return_value=candidate), patch.object(state.evidence, "composite", side_effect=slow) as build:
+            with ThreadPoolExecutor(1) as pool:
+                first = pool.submit(self.client.get, "/evidence/synthetic-candidate", headers=self.evidence_auth)
+                try:
+                    self.assertTrue(started.wait(1))
+                    acquired = state.lock.acquire(blocking=False)
+                    self.assertTrue(acquired)
+                    if acquired: state.lock.release()
+                    pending = self.client.get("/evidence/synthetic-candidate", headers=self.evidence_auth)
+                    self.assertEqual(pending.status_code, 202)
+                finally:
+                    release.set()
+                self.assertEqual(first.result().status_code, 200)
+            self.assertEqual(self.client.get("/evidence/synthetic-candidate", headers=self.evidence_auth).status_code, 200)
+            self.assertEqual(build.call_count, 1)
 
     def test_rest_repair_is_required_even_if_relay_claims_resynchronized(self):
         state = self.enable()

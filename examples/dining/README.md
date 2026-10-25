@@ -28,7 +28,7 @@ Dining camera --RTSP--> Frigate --MQTT reviews--> HA Event Relay
                     |                                   existing NyxBot
              NyxID -> HA node -> Frigate recordings           -> user
                     |
-              <=3 historical frames -> 1 composite -> worker
+              <=24 samples -> <=12 selected frames -> <=3 pages -> worker
 ```
 
 ## Components and ownership
@@ -70,10 +70,17 @@ occupancy, and cleared dishes do not establish consumption. This application
 records whole-table observations, not identities or individual preferences.
 
 Evidence uses tableware-track phases and native-resolution crops of the Frigate
-table zone, rather than three room views just before the activity ends.
+table zone. The v3 selector mixes broad coverage with short bursts to capture
+different turntable positions. It filters near duplicates and lower-quality
+views, selects up to 12 frames from 24 samples, and returns at most three pages
+in `images[]`. The worker matches dishes across frames by appearance and frame
+IDs; positions, track counts and quality scores cannot establish dish identity.
 `EVIDENCE_CROP_PADDING`, `EVIDENCE_MAX_WIDTH`, `EVIDENCE_MAX_HEIGHT` and
-`EVIDENCE_JPEG_QUALITY` tune the crop margin, panel bounds and encoding. Inspect
-the selected historical composite and its phase/warning metadata when checking
+`EVIDENCE_JPEG_QUALITY` tune the crop margin, panel bounds and encoding.
+`EVIDENCE_SAMPLE_FRAMES`, `EVIDENCE_SELECTED_FRAMES`, `EVIDENCE_BURST_SECONDS`
+and `EVIDENCE_SAMPLING_SECONDS` bound sampling, selected views, burst spacing
+and processing time. Inspect the selected historical pages and their frame IDs,
+phase/sampling/warning metadata when checking
 recognition quality; a late activity frame is not necessarily a post-meal frame.
 
 ## 2. Render a private configuration bundle

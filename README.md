@@ -92,23 +92,41 @@ Frigate key before its NyxID expiry. No images or credentials belong in Git.
 
 `GET /evidence/{meal_id}` requires `EVIDENCE_TOKEN`. It resolves only stored
 finalized candidates (or explicit integration validations), uses their fixed
-camera/timestamps, and returns JSON containing one base64 JPEG composite and
-frame timestamps. Clients should save/decode locally and view the single image;
-never print base64 into a model transcript. At most three historical frames are
-used; missing recordings never fall back to current images. A small in-memory
+camera/timestamps, and returns a versioned JSON evidence pack with `images[]`
+(base64 JPEG pages), frame IDs and actual timestamps. Clients should save/decode
+locally and view each page once; never print base64 into a model transcript.
+Missing recordings never fall back to current images. A small in-memory
 cache avoids repeated downloads; source media is not persisted by this service.
-The `tableware-phases-v2` selector uses Frigate's tableware object tracks to
-cover early, middle and late activity, preferring concurrent tracks within each
-phase. It avoids taking every frame after the table has already been cleared.
+The `tableware-diversity-v3` selector samples up to 24 historical frames, mixing
+broad early/middle/late activity coverage with short bursts around Frigate
+tableware-track anchors. It selects up to 12 complementary views using image
+quality, visual novelty and tracked-object density, then packs at most four
+frames per page (at most three pages). Near duplicates and poor-quality views
+are filtered within each phase; the ceilings are not mandatory frame counts.
+The scores are heuristics, not food, dish-count or occlusion detection. The
+worker matches rotating dishes by appearance and frame IDs, not fixed positions;
+neither unique dish identity nor a full turntable revolution is guaranteed.
 Native recording snapshots are cropped to the configured `TABLE_ZONE` bounds
 before resizing, so dishes retain more pixels than a downscaled room view.
+Quality and novelty are scored inside the table polygon when available.
 Metadata/crop failures are explicit warnings with an interval/full-scene fallback;
 no phase is a claim that dining has ended or food was consumed.
+Extraction has a time budget and retains only bounded cropped JPEGs in memory.
+It releases the live-ingestion lock while sampling, permits only one sampling
+job at a time, and returns `202 pending`/`Retry-After: 5` for overlapping requests.
+Retry that same endpoint at most six times after five seconds, including an
+interrupted download; a completed cached retrieval does not resample.
 
 Evidence settings are deployment parameters: `EVIDENCE_CROP_PADDING` (normalized
 full-frame padding, default 0.04), `EVIDENCE_MAX_WIDTH` / `EVIDENCE_MAX_HEIGHT`
 (panel bounds, defaults 1280 / 720; never upscale), and `EVIDENCE_JPEG_QUALITY`
 (default 92). Table geometry comes from Frigate configuration, not source code.
+`EVIDENCE_SAMPLE_FRAMES` (default 24, range 6..48),
+`EVIDENCE_SELECTED_FRAMES` (default 12, range 3..12, no more than samples),
+`EVIDENCE_BURST_SECONDS` (default 12, range 2..60) and
+`EVIDENCE_SAMPLING_SECONDS` (default 35, range 5..40) bound coverage and cost.
+Event budgets advertise upstream source samples separately from selected frames
+and image pages. Validation remains one source frame and one image.
 These settings do not change the aggregation rules or require a new state volume.
 With the adapter enabled, REST review repair is required before finalization,
 independently of any relay `resynced` assertion. A failed or truncated repair

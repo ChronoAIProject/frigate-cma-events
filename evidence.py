@@ -5,10 +5,11 @@ from datetime import datetime, timezone
 from io import BytesIO
 import json
 import math
+import time
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from PIL import Image, ImageDraw, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageStat, UnidentifiedImageError
 
 
 class EvidenceUnavailable(Exception):
@@ -26,6 +27,10 @@ class EvidenceOptions:
     max_width: int = 1280
     max_height: int = 720
     jpeg_quality: int = 92
+    sample_frames: int = 24
+    selected_frames: int = 12
+    burst_seconds: float = 12
+    sampling_seconds: float = 35
 
     def __post_init__(self):
         if not 0 <= self.crop_padding <= 0.15:
@@ -34,6 +39,14 @@ class EvidenceOptions:
             raise ValueError("Evidence panel dimensions exceed supported bounds")
         if not 60 <= self.jpeg_quality <= 95:
             raise ValueError("EVIDENCE_JPEG_QUALITY must be between 60 and 95")
+        if not 6 <= self.sample_frames <= 48 or not 3 <= self.selected_frames <= min(12, self.sample_frames):
+            raise ValueError("Evidence requires 6..48 samples and 3..12 selected frames, not more than samples")
+        if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
+            raise ValueError("Invalid evidence burst or sampling time budget")
+
+    def budget(self):
+        return {"max_model_turns": 1, "max_images": math.ceil(self.selected_frames / 4),
+                "max_source_frames": self.sample_frames, "max_selected_frames": self.selected_frames}
 
 
 def finite(value):
@@ -79,6 +92,95 @@ def select_frames(start, end, events):
     return selected
 
 
+def sample_frames(start, end, events, options):
+    """Bounded broad coverage plus short bursts around dish-track anchors.
+
+    Interleave phases so a slow/missing recording does not consume the entire
+    budget on early activity. Track counts are proposals, never dish counts.
+    """
+    anchors = {f["phase"]: f["timestamp"] for f in select_frames(start, end, events)}
+    first = min(e["start"] for e in events) if events else start
+    last = max(e["end"] for e in events) if events else end
+    pools, seen = [], set()
+    for i, phase in enumerate(("early", "middle", "late")):
+        lo, hi = first + (last - first) * i / 3, first + (last - first) * (i + 1) / 3
+        anchor = anchors.get(phase, (lo + hi) / 2)
+        quota = options.sample_frames // 3 + (i < options.sample_frames % 3)
+        spread = max(2, quota - 5)
+        # Reserve broad samples as well as a burst; no assumption that the
+        # turntable completes a revolution in any particular number of seconds.
+        times = [(anchor + k * options.burst_seconds, "anchor_burst") for k in (0, -1, 1, -2, 2)][:quota - spread]
+        times += [(lo + (hi - lo) * (j + 0.5) / spread, "interval_coverage") for j in range(spread)]
+        # Fill unused slots when a burst anchor coincides with a broad sample
+        # or is clipped at a phase boundary, still within the original budget.
+        times += [(lo + (hi - lo) * (j + 0.5) / (quota * 2), "interval_coverage") for j in range(quota * 2)]
+        pool = []
+        for timestamp, source in times:
+            if len(pool) >= quota:
+                break
+            timestamp = min(hi, max(lo, timestamp))
+            if round(timestamp, 3) in seen:
+                continue
+            seen.add(round(timestamp, 3))
+            active = [e for e in events if e["start"] <= timestamp <= e["end"]]
+            pool.append({"timestamp": timestamp, "phase": phase, "sampling": source,
+                         "selection": "tableware_tracks" if events else "interval_fallback",
+                         "tracked_objects": len(active)})
+        pools.append(pool)
+    return [pool[j] for j in range(max(map(len, pools), default=0)) for pool in pools if j < len(pool)]
+
+
+def visual_metrics(panel, polygon=None):
+    """Cheap image-quality/novelty heuristics, not a food or occlusion model."""
+    small = panel.resize((48, 32), Image.Resampling.BILINEAR)
+    mask = Image.new("L", small.size, 0 if polygon else 255)
+    if polygon:
+        ImageDraw.Draw(mask).polygon([(x * small.width, y * small.height) for x, y in polygon], fill=255)
+    small.paste((128, 128, 128), mask=ImageChops.invert(mask))
+    gray = small.convert("L")
+    contrast = ImageStat.Stat(gray, mask).stddev[0]
+    focus = ImageStat.Stat(ImageChops.difference(gray, gray.filter(ImageFilter.GaussianBlur(1))), mask).mean[0]
+    hist = gray.histogram(mask=mask)
+    exposed = (sum(hist[:8]) + sum(hist[248:])) / max(1, sum(hist))
+    quality = 0.5 * min(1, focus / 12) + 0.2 * min(1, contrast / 64) + 0.3 * (1 - exposed)
+    return {"quality": round(quality, 4), "focus": round(focus, 3),
+            "clipped_exposure": round(exposed, 4), "_signature": small.tobytes()}
+
+
+def visual_distance(left, right):
+    return sum(abs(a - b) for a, b in zip(left, right, strict=True)) / (255 * len(left))
+
+
+def select_diverse_frames(records, limit):
+    """Keep quality and complementary views within every activity phase."""
+    chosen = []
+    for i, phase in enumerate(("early", "middle", "late")):
+        pool = [r for r in records if r["phase"] == phase]
+        quota = limit // 3 + (i < limit % 3)
+        picked = []
+        peak = max((r["tracked_objects"] for r in pool), default=1) or 1
+        floor = max((r["quality"] for r in pool), default=0) * 0.6
+        while pool and len(picked) < quota:
+            ranked = []
+            for record in pool:
+                if record["quality"] < floor:
+                    continue
+                novelty = min((visual_distance(record["_signature"], p["_signature"]) for p in picked), default=0.12)
+                if picked and novelty < 0.018:
+                    continue
+                rank = (0.25 * record["tracked_objects"] / peak + 0.35 * record["quality"]
+                        + 0.4 * min(1, novelty / 0.12), record["quality"], -record["timestamp"])
+                ranked.append((rank, record, novelty))
+            if not ranked:
+                break
+            _, best, novelty = max(ranked, key=lambda item: item[0])
+            best["visual_novelty"] = round(novelty, 4) if picked else None
+            picked.append(best)
+            pool = [r for r in pool if r is not best]
+        chosen.extend(picked)
+    return sorted(chosen, key=lambda r: r["timestamp"])
+
+
 class FrigateEvidence:
     def __init__(self, proxy_url, key, camera, table_zone="", options=None):
         url = urlsplit(proxy_url)
@@ -87,13 +189,14 @@ class FrigateEvidence:
             raise ValueError("FRIGATE_PROXY_URL must be an HTTPS service proxy URL")
         self.url, self.key, self.camera = proxy_url.rstrip("/"), key, camera
         self.table_zone, self.options = table_zone, options or EvidenceOptions()
+        self.table_polygon = None
         self.opener = build_opener(NoRedirect)
 
-    def get(self, path, limit=2 * 1024 * 1024):
+    def get(self, path, limit=2 * 1024 * 1024, timeout=15):
         request = Request(self.url + "/" + path, headers={
             "Authorization": "Bearer " + self.key, "User-Agent": "frigate-cma-events/0.2"})
         try:
-            with self.opener.open(request, timeout=15) as response:
+            with self.opener.open(request, timeout=timeout) as response:
                 raw = response.read(limit + 1)
                 if len(raw) > limit:
                     raise EvidenceUnavailable("upstream_size_limit")
@@ -149,6 +252,7 @@ class FrigateEvidence:
 
     def table_crop(self):
         """Use the deployment's existing normalized Frigate table-zone geometry."""
+        self.table_polygon = None
         if not self.table_zone:
             return None
         try:
@@ -165,6 +269,7 @@ class FrigateEvidence:
                       min(1, max(x) + pad), min(1, max(y) + pad)]
             if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
                 raise ValueError()
+            self.table_polygon = list(zip(x, y, strict=True))
             return bounds
         except (ValueError, KeyError, TypeError) as exc:
             raise EvidenceUnavailable("table_zone_unavailable") from exc
@@ -175,6 +280,7 @@ class FrigateEvidence:
         start, end = candidate["started_at"], candidate["ended_at"]
         if not all(finite(t) for t in (start, end)) or end < start:
             raise EvidenceUnavailable("invalid_interval")
+        deadline = time.monotonic() + self.options.sampling_seconds
         warnings = []
         if candidate.get("test"):
             selections = [{"timestamp": max(start, end - 2), "phase": "validation",
@@ -185,9 +291,9 @@ class FrigateEvidence:
             except EvidenceUnavailable as exc:
                 events = []
                 warnings.append(str(exc))
-            selections = select_frames(start, end, events)
+            selections = sample_frames(start, end, events, self.options)
             if not events:
-                warnings.append("No usable tableware tracks; evenly spaced activity samples only.")
+                warnings.append("No usable tableware tracks; interval and burst samples only.")
         try:
             crop = self.table_crop()
         except EvidenceUnavailable as exc:
@@ -195,17 +301,19 @@ class FrigateEvidence:
             warnings.append(str(exc))
         if crop is None:
             warnings.append("Table crop unavailable; full-scene evidence has lower table detail.")
-        frames, panels, missing, annotations, seen = [], [], [], [], set()
+        records, missing, attempted, retained_bytes = [], [], 0, 0
         for selection in selections:
             timestamp = selection["timestamp"]
-            if round(timestamp, 3) in seen:
-                continue
-            seen.add(round(timestamp, 3))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or retained_bytes >= 24 * 1024 * 1024:
+                warnings.append("Candidate sampling budget exhausted; partial coverage only.")
+                break
             # Fetch native resolution first. Resizing the whole room before
             # cropping destroys precisely the small dish details we need.
             path = "api/" + quote(self.camera, safe="") + f"/recordings/{timestamp:.3f}/snapshot.jpg"
+            attempted += 1
             try:
-                raw = self.get(path, limit=6 * 1024 * 1024)
+                raw = self.get(path, limit=6 * 1024 * 1024, timeout=min(6, remaining))
                 with Image.open(BytesIO(raw)) as source:
                     if source.width * source.height > 16_000_000:
                         raise EvidenceUnavailable("image_dimensions_limit")
@@ -216,32 +324,59 @@ class FrigateEvidence:
                     if box:
                         panel = panel.crop(box)
                     panel.thumbnail((self.options.max_width, self.options.max_height), Image.Resampling.LANCZOS)
-                frames.append(timestamp)
-                panels.append(panel)
-                annotations.append({**selection, "source_size": original_size, "crop_pixels": box,
-                                    "panel_size": list(panel.size)})
+                polygon = ([(max(0, min(1, (x - crop[0]) / (crop[2] - crop[0]))),
+                             max(0, min(1, (y - crop[1]) / (crop[3] - crop[1]))))
+                            for x, y in self.table_polygon] if crop and self.table_polygon else None)
+                encoded = BytesIO()
+                panel.save(encoded, format="JPEG", quality=self.options.jpeg_quality)
+                jpeg = encoded.getvalue()
+                retained_bytes += len(jpeg)
+                records.append({**selection, "source_size": original_size, "crop_pixels": box,
+                                "panel_size": list(panel.size), "scoring_region": "table_polygon" if polygon else "crop",
+                                **visual_metrics(panel, polygon), "_jpeg": jpeg})
             except (EvidenceUnavailable, UnidentifiedImageError, OSError, Image.DecompressionBombError):
                 missing.append(timestamp)
-        if not panels:
+        if not records:
             raise EvidenceUnavailable("historical_frames_unavailable")
-        width = max(p.width for p in panels)
-        output = Image.new("RGB", (width, sum(p.height + 28 for p in panels)), "#111111")
-        draw, y = ImageDraw.Draw(output), 0
-        for panel, annotation in zip(panels, annotations, strict=True):
-            label = annotation["phase"] + " | " + datetime.fromtimestamp(annotation["timestamp"], timezone.utc).isoformat()
-            draw.text((8, y + 5), label, fill="white")
-            output.paste(panel, (0, y + 28))
-            y += panel.height + 28
-        data = BytesIO()
-        output.save(data, format="JPEG", quality=self.options.jpeg_quality)
-        if data.tell() > 2 * 1024 * 1024:
-            raise EvidenceUnavailable("composite_size_limit")
+        if missing:
+            warnings.append("Some candidate historical frames are unavailable; coverage is incomplete.")
+        selected = records if candidate.get("test") else select_diverse_frames(records, self.options.selected_frames)
+        annotations, images = [], []
+        for offset in range(0, len(selected), 4):
+            page = selected[offset:offset + 4]
+            columns = min(2, len(page))
+            cell_w, cell_h = max(r["panel_size"][0] for r in page), max(r["panel_size"][1] for r in page) + 28
+            output = Image.new("RGB", (columns * cell_w, math.ceil(len(page) / columns) * cell_h), "#111111")
+            draw = ImageDraw.Draw(output)
+            frame_ids = []
+            for j, record in enumerate(page):
+                frame_id = f"F{offset + j + 1:02d}"
+                frame_ids.append(frame_id)
+                x, y = (j % columns) * cell_w, (j // columns) * cell_h
+                label = frame_id + " " + record["phase"] + " | " + datetime.fromtimestamp(record["timestamp"], timezone.utc).isoformat(timespec="milliseconds")
+                draw.text((x + 6, y + 5), label, fill="white")
+                with Image.open(BytesIO(record["_jpeg"])) as panel:
+                    output.paste(panel, (x, y + 28))
+                annotations.append({**{k: v for k, v in record.items() if not k.startswith("_")},
+                                    "frame_id": frame_id, "page": len(images) + 1, "row": j // columns, "column": j % columns})
+            data = BytesIO()
+            output.save(data, format="JPEG", quality=self.options.jpeg_quality)
+            if data.tell() > 2 * 1024 * 1024:
+                raise EvidenceUnavailable("composite_size_limit")
+            images.append({"page": len(images) + 1, "frame_ids": frame_ids, "size": list(output.size),
+                           "mime_type": "image/jpeg", "image_base64": base64.b64encode(data.getvalue()).decode()})
+        budget = ({"max_model_turns": 1, "max_images": 1, "max_source_frames": 1, "max_selected_frames": 1}
+                  if candidate.get("test") else self.options.budget())
         return {"meal_id": candidate["meal_id"], "camera": self.camera,
-                "mime_type": "image/jpeg", "image_base64": base64.b64encode(data.getvalue()).decode(),
-                "frame_timestamps": frames, "missing_timestamps": missing,
-                "evidence_version": "tableware-phases-v2", "frames": annotations,
+                "images": images, "frame_timestamps": [r["timestamp"] for r in selected], "missing_timestamps": missing,
+                "evidence_version": "tableware-diversity-v3", "frames": annotations, "evidence_budget": budget,
+                "sampling": {"planned": len(selections), "attempted": attempted, "available": len(records),
+                             "selected": len(selected), "discarded": len(records) - len(selected)},
                 "crop_normalized": crop, "warnings": warnings,
                 "test": bool(candidate.get("test")),
                 "cautions": ["Activity is not proof of a meal; removed food is not proof it was eaten.",
                              "Early/middle/late describe tableware activity, not confirmed meal phases.",
-                             "The late panel can precede meal end; missing dishes do not establish leftovers."]}
+                             "Late frames can precede meal end; missing dishes do not establish leftovers.",
+                             "Track counts, quality and visual novelty are heuristics, not dish counts or occlusion detection.",
+                             "A turntable moves the same dish. Match by appearance across frames, not fixed position; do not count it twice.",
+                             "Sampling cannot guarantee a complete turntable revolution or visibility of every dish."]}
