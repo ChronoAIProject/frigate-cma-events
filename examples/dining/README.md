@@ -8,27 +8,28 @@ synthetic. Your camera, owner, services, spreadsheet and credentials belong in
 private deployment files.
 
 ```text
-Dining camera --RTSP--> Frigate --MQTT reviews--> HA Event Relay
-                                                    |
-                                           HTTPS metadata + durable queue
-                                                    v
-                                            frigate-cma-events
-                                      dedupe / merge / REST repair / limits
-                                                    |
-                                         signed meal-end candidate
-                                                    v
-                                            CMA Event Channel
-                                                    |
-                                                    v
-                                              Dining worker
-                                                    |
-                bounded evidence request -----------+------> Google Sheets
-                    |                                          ^
-             this app's /evidence                               |
-                    |                                   existing NyxBot
-             NyxID -> HA node -> Frigate recordings           -> user
-                    |
-              <=24 samples -> <=12 selected frames -> <=3 pages -> worker
+Dining camera -> Frigate -> MQTT reviews -> HA Event Relay
+                                                |
+                                     authenticated local metadata
+                                                v
+                                    CMA Event Pipeline on HA
+                              dedupe / merge / REST repair / limits
+                                                |
+                                     signed meal-end candidate
+                                                v
+                                      CMA Event Channel
+                                                |
+                                          remote dining worker -> Google Sheets
+                                                |                     ^
+                                     bounded evidence/result          |
+                                                |               existing NyxBot
+                               NyxID -> ordinary HA node              |
+                                                |                   user
+                                 local Pipeline /evidence and /results
+                                                |
+                                    local Frigate recordings
+                                                |
+                            <=24 samples -> <=12 frames -> <=3 pages
 ```
 
 ## Components and ownership
@@ -37,29 +38,35 @@ Dining camera --RTSP--> Frigate --MQTT reviews--> HA Event Relay
 | --- | --- |
 | Frigate + MQTT broker | Existing local services: detections, recordings and review messages |
 | HA node + Event Relay | [nyx-homeassistant-node](https://github.com/ChronoAIProject/nyx-homeassistant-node): local proxy and configurable event forwarding |
-| Aggregation + evidence + outboxes | This repository; one app, one replica, durable state |
+| Aggregation + evidence + outboxes | This repository owns the generic core; one process/state set |
+| HA Pipeline packaging | `nyx-homeassistant-node/cma-event-pipeline`; pinned core image, HA options, local SQLite `/data/state` |
 | Event channel + worker | [CMA](https://github.com/ChronoAIProject/cma): route candidates and execute visual analysis |
 | Credentials + service routes + NyxBot | [NyxID](https://github.com/ChronoAIProject/NyxID): broker scoped access and provide the existing user-facing assistant |
 | Personal installation | Private platform settings/files; never committed to any of these repositories |
 
-The `dining-evidence` name in a deployment is a NyxID HTTP service pointing to
-this same app. The worker and channel are CMA configuration, not another custom
+The worker-facing evidence service name is private deployment configuration.
+It is a NyxID HTTP routing/credential entry for this same Pipeline, not another
+application. On HA, its scoped delegation can reach a node-bound worker route;
+a separate operator route injects the operator credential. The worker and channel are CMA configuration, not another custom
 worker codebase. This path uses CMA's existing `cma_codex` provider and the app's
 `/ingest` endpoint; it does not require registering a new gateway provider.
 
 ## 1. Prepare the local services and destination
 
 - Install/configure Frigate, an MQTT broker, NyxID Node and Home Assistant Event
-  Relay. Keep the relay disabled until the cloud app and channel are ready.
+  Relay, plus the CMA Event Pipeline add-on for local aggregation. Keep the
+  relay disabled until the chosen Pipeline and channel are ready.
 - Fix the camera angle so the table is visible. Configure the camera's seat and
   table-surface zones and track `person` plus supported tableware labels
   (`plate`, `bowl`, `cup`, `bottle`). This example does not change camera settings.
 - Enable Frigate MQTT with the `frigate` topic prefix. Confirm `frigate/reviews`
   messages, actual zone names and retained historical recordings. For a custom
   prefix, change the topic in your private relay configuration.
-- Make the Frigate HTTP API reachable through a NyxID service on the local node.
-  Verify `api/review?limit=5` and a historical recording snapshot through that
-  service. The snapshot API is `api/{camera}/recordings/{timestamp}/snapshot.jpg`.
+- For local HA processing, configure the Pipeline's `frigate_url` with Frigate's
+  trusted internal hostname/API port. For optional cloud aggregation, use a
+  narrowly scoped NyxID Frigate service/key. Verify `api/review?limit=5` and
+  historical `api/{camera}/recordings/{timestamp}/snapshot.jpg` availability
+  through the selected source path. Do not expose the internal API publicly.
 - Connect your Google Workspace service. Create a dedicated spreadsheet tab;
   [sheet-schema.json](sheet-schema.json) defines ten columns in A:J, with meal_id
   in B. Existing tabs may use translated column names supplied privately through
@@ -83,7 +90,68 @@ and processing time. Inspect the selected historical pages and their frame IDs,
 phase/sampling/warning metadata when checking
 recognition quality; a late activity frame is not necessarily a post-meal frame.
 
-## 2. Render a private configuration bundle
+## 2. Prepare private configuration
+
+### Local HA deployment
+
+Follow the [HA deployment guide](../../docs/home-assistant.md) for installation,
+option mapping and node delegation. No cloud origin, cloud database or raw
+Frigate proxy key is needed for local processing. Keep site parameters and
+credentials outside source control, in a private directory and HA options.
+
+For a new installation, resolve [pipeline.example.json](pipeline.example.json)
+with your camera/source/zones and rule values, or generate that policy from the
+same defaults as the application renderer:
+
+```sh
+# Set DINING_SITE_DIR, CAMERA, SEATS_ZONE, TABLE_ZONE and EVENT_SOURCE privately.
+# Optional TIMEZONE defaults to UTC. This writes only the policy, not credentials.
+uv run python - <<'PY'
+import json, os
+from pathlib import Path
+from profiles import Rules
+site = Path(os.environ["DINING_SITE_DIR"])
+site.mkdir(parents=True, exist_ok=True, mode=0o700)
+site.chmod(0o700)
+policy = Rules(camera=os.environ["CAMERA"], seats_zone=os.environ["SEATS_ZONE"],
+               table_zone=os.environ["TABLE_ZONE"],
+               timezone=os.environ.get("TIMEZONE", "UTC")).pipeline(os.environ["EVENT_SOURCE"]).spec
+with (site / "pipeline.json").open("x") as output:
+    os.chmod(output.name, 0o600)
+    json.dump(policy, output, ensure_ascii=False, indent=2)
+PY
+```
+
+Tune the resolved policy deliberately before first start. Serialize its JSON as
+the add-on's `pipeline_config` string. Copy the
+[worker prompt](worker-prompt.md), [channel template](channel.example.json) and
+[Sheet schema](sheet-schema.json) to private files. Supply the actual
+worker-facing service, model, owner and Sheet settings:
+
+- Append a private `dining-config.json` to the worker prompt. It contains
+  `spreadsheet_id`, `tab`, `sheet_service`, `sheet_connection`, `evidence_service`,
+  `timezone`, and the ten `columns` in schema order.
+- Compute `values_base` as `v4/spreadsheets/<spreadsheet-id>/values/`; append the
+  URL-encoded quoted-tab range for `headers_path` (`A1:J1`), `ids_path` (`B:B`),
+  and `read_path` (`A:J`). `append_path` is that same encoded A:J range followed
+  by `:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`.
+- Build the normal CMA `worker-request.json` with `name` and a `profile` containing
+  `model`, `reasoning_effort`, `permission_mode`, `permissions.services` and
+  `system_prompt`, as used by the cloud renderer below. The service list includes
+  only the configured evidence, Google Workspace and model services.
+- Resolve the channel template's name/owner/model/service/prompt/key-ID variables
+  privately. Reserve one `record_id` UUID. Leave the actual ready Agent ID and
+  credential placeholders for the lifecycle steps below.
+
+An existing installation can reuse its private worker/channel/Sheet bundle and
+policy while migrating runtime placement. Preserve its service ID, channel and
+candidate IDs. The add-on's private state import handles persistence migration.
+
+### Optional cloud bundle renderer
+
+The current `examples/dining/render.py` generates a **cloud** app bundle; it does
+not produce HA Pipeline options. Use it for the cloud alternative, or reuse
+already-rendered worker/Sheet artifacts without deploying its cloud app.
 
 Run from the repository root:
 
@@ -133,6 +201,22 @@ before replacing legacy environment settings; retain its state and channel.
 
 ## 3. Supply credentials and register the evidence service
 
+### HA options and routes
+
+Set distinct `relay_token`, `api_token`, `provider_token` and `worker_token`
+values in HA. Set `frigate_url` to the local API and leave `frigate_api_key`
+empty if that trusted internal API needs no bearer. Keep the matching CMA HMAC
+secret/key-ID in the Pipeline and channel; the Relay receives only its ingest
+token. Credentials in HA password fields remain in private options/backups.
+
+Create a node-bound worker service and a separate owner-only operator service.
+For CMA managed workers, configure the [scoped NyxID delegation](../../docs/home-assistant.md#worker-and-operator-access)
+while preserving the existing worker-facing service ID. The worker gets the
+worker-facing evidence service and Google/model access, not raw Frigate or
+operator routes. Keep managed-key scope/lifecycle under CMA control.
+
+### Cloud alternative
+
 Fill `app-secrets.json` privately:
 
 - `API_TOKEN`, `PROVIDER_TOKEN`, `RELAY_TOKEN`, `EVIDENCE_TOKEN`: distinct random
@@ -145,7 +229,8 @@ Fill `app-secrets.json` privately:
   Use the same base64 **string** in the channel's `hmac_secrets`; do not decode
   it when signing. `CMA_HMAC_KEY_ID` must agree in the app and channel.
 
-Register an owner-scoped NyxID custom HTTP service for `APP_ORIGIN`, using bearer
+For the cloud alternative, register an owner-scoped NyxID custom HTTP service
+for `APP_ORIGIN`, using bearer
 auth with `EVIDENCE_TOKEN` and no node binding. For example, save that token in a
 private file and use:
 
@@ -213,9 +298,9 @@ idempotency keys in `DINING_SITE_DIR`.
    After an uncertain create, recover with `GET /channel-records/{record_id}`
    or repeat the exact original request. Do not invent another identity merely
    because a response was lost.
-7. Copy `endpoints.custom_event_url` verbatim into the service env's
-   `CMA_EVENT_URL` in private `app-spec.json`. Preserve opaque channel references;
-   do not retype or shorten them.
+7. Copy `endpoints.custom_event_url` verbatim into HA's `cma_event_url`, or
+   `CMA_EVENT_URL` in private `app-spec.json` for a cloud deployment. Preserve
+   opaque channel references; do not retype or shorten them.
 
 Service access is chosen during normal Agent creation. Changes to an existing
 Agent may currently require web approval even for an already-authorized owner
@@ -223,7 +308,15 @@ API client; see [CMA #1110](https://github.com/ChronoAIProject/cma/issues/1110).
 
 ## 5. Deploy, initialize the Sheet and enable the relay
 
-Deploy the completed `app-spec.json` through your cloud platform and upload
+For HA, start the configured Pipeline add-on and verify health/status through
+its ordinary node-backed service. Point Relay's existing destination at the
+actual internal `/ingest` hostname/port, set `allow_local_http: true` and use
+`auth_token=relay_token`. Keep its destination ID during migration so queued
+entries use the updated destination. The add-on stores SQLite in `/data/state`;
+no cloud app or MongoDB is involved. See the [HA runbook](../../docs/home-assistant.md).
+
+For the cloud alternative, deploy the completed `app-spec.json` through your
+cloud platform and upload
 `app-secrets.json` through its secret API. [Deployment details](../../deploy/README.md)
 cover the chrono-cd paths. Use one replica and the rendered MongoDB add-on or a
 durable volume. Wait for the platform to apply the spec, then verify the live
@@ -235,7 +328,8 @@ initialize A1:J1 through the configured Google Workspace connection with
 tab, read and verify its headers first. The worker's private configuration uses
 `v4/spreadsheets/...`; the service base already supplies the Google API host.
 
-Fill the private relay's broker password and `auth_token=RELAY_TOKEN`, then copy
+Fill the private relay's broker password and the chosen Pipeline's matching
+ingest token, then copy
 the options into the HA Event Relay add-on and start it. The example forwards
 only the configured camera's reviews and heartbeats. Its route has an empty
 topic filter because heartbeat envelopes do not have an MQTT topic.
@@ -263,7 +357,17 @@ Run `uv run python -m unittest discover -s tests -v` locally. The existing
 only on an isolated test app with evidence/CMA delivery disabled and shortened
 rule thresholds; its restart/resume check verifies persistence.
 
-For explicit integration validation, save the header line
+For local HA validation, use the actual owner-only operator service:
+
+```sh
+nyxid proxy request <operator-service-slug> "api/validation" --method POST --body '{}'
+nyxid proxy request <operator-service-slug> "api/results/<returned-candidate-id>"
+```
+
+The node injects the API token. Do not send that token to NyxID as the owner
+Authorization credential. Submit once and retain the candidate ID.
+
+For the cloud alternative, save the header line
 `Authorization: Bearer <API_TOKEN>` in a private 0600 `operator.headers` file, then:
 
 ```sh
@@ -303,8 +407,18 @@ day with an hour cooldown. These are deployment parameters, not food semantics.
   a missing past frame.
 - Restart: verify the configured persistence backend restores decisions,
   receipts and pending outbox entries. Archive retired test state separately.
-- Rotation: renew the Frigate key before expiry, update app secrets, and keep
-  channel HMAC/key-id changes consistent. CMA owns its managed key lifecycle.
-- Retirement: stop the relay route, pause the dedicated worker/sandbox, and
-  retire the cloud app/test app when no longer needed. Keep only deliberately
-  retained private records; template source contains no installation data.
+- Rotation: for HA, renew the dedicated node-service delegation before expiry
+  and update its private worker-facing credential. A cloud installation also
+  needs its scoped Frigate reader key renewed. Keep HMAC/key-ID changes
+  consistent; CMA owns its managed sandbox key lifecycle.
+- Migration cleanup: verify the local chain and restart persistence, archive
+  source specs/state privately, clear/remove the obsolete database and cloud
+  app, then revoke only their exclusive keys. Keep current routing/delegation
+  and operator services; they are credential roles for one running Pipeline.
+- Failed worker attempts: stop/delete the unused Agent and retire its dedicated
+  sandbox via CMA APIs. Check actual terminal state and revocation; an accepted
+  request can remain pending if runtime dependencies fail. Retained history is
+  not a running worker. Keep cleanup receipts private.
+- Full retirement: disable the application Relay route before removing its
+  Pipeline/worker/channel, then intentionally archive/remove its private state
+  and grants. Other configured workflows must remain unaffected.

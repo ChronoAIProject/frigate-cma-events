@@ -1,4 +1,8 @@
-# Cloud deployment
+# Cloud deployment (optional)
+
+For aggregation beside HA/Frigate, use the [Home Assistant deployment guide](../docs/home-assistant.md).
+That topology uses local SQLite and needs no cloud app or MongoDB. This document
+covers the alternative remote deployment and the cloud-only app-spec renderer.
 
 Choose a [pipeline example](../README.md#examples) and supply its configuration
 at deployment. For the complete **HA relay → aggregation → CMA worker → Google Sheets**
@@ -96,3 +100,24 @@ worker application, and keep custom provider experiments on isolated test state.
   real-world recognition. Verify those independently before activating real events.
 - CMA 2xx delivery proves admission, not model completion or a Sheet write.
   Read `/api/results/{candidate_id}` and independently verify the downstream result.
+
+## Migrate to HA and remove a retired cloud app
+
+Follow the [HA guide](../docs/home-assistant.md#migration-and-retirement) and
+the add-on runbook: pause the source, export/restore state with the same policy,
+move the existing Relay destination and worker-facing service, and verify local
+state, evidence, destination writes and restart persistence. Remove the import
+URL after success. Save source specs/exports privately as historical backups.
+
+A zero-replica app still retains platform records, secrets and database resources.
+Before deleting it, back up its exact database and verify that its data has been
+cleared. `DELETE api/v1/projects/PROJECT/apps/APP?org_id=ORG_ID&purge=true`
+requests app/add-on cleanup, but confirm the platform's actual behavior: some
+versions remove only the database user even when returning `purged: true`. Do
+not treat that response as proof of database-data removal. Recheck app absence.
+
+Revoke credentials exclusive to the removed cloud reader or failed experiments.
+Retire obsolete CMA Agents/sandboxes through CMA, observing their terminal
+states and managed-key revocation. Keep the current worker, channel and local
+NyxID routing/delegation/operator services. Update private inventories and
+assistant operational memory, without publishing site values or receipts.

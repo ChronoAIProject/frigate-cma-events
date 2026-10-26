@@ -136,9 +136,11 @@ external write; verify the destination independently.
 
 ## Evidence
 
-`evidence.adapter` defaults `none`. `frigate` requires a fixed Frigate subject,
-exact proxy URL and scoped credentials. `crop_zone`, `labels`, `cautions` and
-`version` are deployment parameters. No configured labels means interval/burst
+`evidence.adapter` defaults `none`. `frigate` requires a fixed Frigate subject
+and either explicit local `FRIGATE_URL` (HTTP/HTTPS, optional bearer) or HTTPS
+`FRIGATE_PROXY_URL` with credentials scoped to the exact service/node. Do not
+set both URL variables. The [HA guide](home-assistant.md) maps these to add-on
+options. `crop_zone`, `labels`, `cautions` and `version` are deployment parameters. No configured labels means interval/burst
 sampling with explicit fallback metadata, not an implicit food/object class.
 
 Options and defaults:
@@ -200,3 +202,18 @@ Keep a private deployment/spec backup and use one writer during migration.
 CMA output type, legacy aliases and ID prefix remain explicit in the dining
 configuration, preserving existing workers and rows. Real event media and
 installation parameters must stay outside Git.
+
+## Runtime placement and retirement
+
+The policy schema is identical on HA and in a cloud deployment. HA's add-on
+wrapper supplies `pipeline_config` and private options, persists SQLite in
+`/data/state`, and reads local Frigate history. CMA worker inference and
+destination writes remain separate. See [HA deployment](home-assistant.md) for
+networking, credential roles, managed-worker delegation and verification.
+
+After migrating state and verifying the destination, retire the source
+deployment/database and its exclusive credentials. Preserve private portable
+backups and existing candidate IDs instead of keeping a live rollback service.
+Worker-facing, delegated node and operator entries remain part of the active
+auth path. Verify actual deletion/credential revocation; a stopped app or an
+accepted asynchronous retirement is not completed resource removal.

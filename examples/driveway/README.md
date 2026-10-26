@@ -8,10 +8,12 @@ in a configured gate zone qualify a candidate. The output type is
 and select up to six frames in two pages.
 
 Copy [pipeline.example.json](pipeline.example.json) outside the checkout and
-set your source URI, camera subject and crop zone. Deploy with
-`PIPELINE_CONFIG_FILE`, the owner's `FRIGATE_PROXY_URL`, mounted
-`FRIGATE_API_KEY`, `WORKER_SERVICE` and distinct mounted `WORKER_TOKEN`. Set
-your own CMA channel URL and HMAC credentials. Source connectivity plus a
+set your source URI, camera subject and crop zone. For local HA processing,
+supply the resolved JSON through `pipeline_config` and a local `frigate_url`
+in the [HA add-on](../../docs/home-assistant.md); set worker-service/token and
+CMA channel/HMAC options there. For optional cloud processing, use
+`PIPELINE_CONFIG_FILE`, HTTPS `FRIGATE_PROXY_URL`, a scoped mounted
+`FRIGATE_API_KEY`, `WORKER_SERVICE` and distinct mounted `WORKER_TOKEN`. Source connectivity plus a
 successful Frigate REST repair are required before finalization.
 
 Configure a separate worker to describe only supported vehicle activity using

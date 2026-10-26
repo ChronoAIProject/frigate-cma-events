@@ -34,6 +34,19 @@ are deployment configuration. Public examples contain synthetic values only.
 The dining renderer produces a complete private installation bundle including
 `pipeline.json`, worker instructions, channel and Sheet settings.
 
+## Deployment choices
+
+For an HA/Frigate installation, run aggregation and historical selection locally
+with the [Home Assistant add-on](docs/home-assistant.md). It uses local SQLite
+and the internal add-on network. CMA workers and NyxBot remain remote; selected
+evidence is sent to the worker. The core repository and HA packaging repository
+have separate responsibilities, with one implementation of the runtime.
+
+[Cloud deployment](deploy/README.md) remains an alternative for other sites.
+Its app-spec renderer and MongoDB snapshot support are optional; they are not
+prerequisites for running on HA. Use one deployment/state set per independent
+policy/owner and one writer per state set.
+
 ## Configuration
 
 Supply a validated JSON document through `PIPELINE_CONFIG_FILE` or
@@ -57,8 +70,10 @@ entry or administrator access is required for normal relay ingestion.
 
 For worker callbacks, optionally configure `WORKER_SERVICE` (the owner's NyxID
 service entry for this app) and distinct mounted `WORKER_TOKEN`. The historical
-Frigate adapter additionally needs `FRIGATE_PROXY_URL` and mounted
-`FRIGATE_API_KEY`, scoped to the exact source service/node. Existing
+Frigate adapter needs either an explicitly configured local `FRIGATE_URL`
+(with optional bearer), or HTTPS `FRIGATE_PROXY_URL` and mounted
+`FRIGATE_API_KEY` scoped to the exact source service/node. The two URL settings
+are mutually exclusive. Existing
 `EVIDENCE_SERVICE` / `EVIDENCE_TOKEN` names are supported. Model keys, Sheets and
 NyxBot settings belong to the chosen worker/example, not the aggregation engine.
 
@@ -162,7 +177,10 @@ while preserving IDs, decisions, receipts, outbox and results.
 
 Licensed under Apache-2.0.
 
-## Home Assistant deployment
+## Home Assistant packaging and migration
+
+See the [complete HA guide](docs/home-assistant.md) for option mapping, local
+Relay routing, managed-worker delegation, testing and legacy-resource retirement.
 
 The [CMA Event Pipeline add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline)
 runs this same image/core beside HA Event Relay and Frigate. It stores SQLite in
@@ -184,3 +202,9 @@ Restore validates schema, source, policy digest, checksums and SQLite integrity,
 and refuses an existing database. Keep the source paused until the destination
 is verified; run only one writer. Preserve the original worker-service identity
 when moving its endpoint, and retain a private export for rollback.
+
+After verifying a local migration, retain private exports/specs rather than a
+live zero-replica rollback app. Remove the retired deployment and database,
+revoke its exclusive keys, and update private operational records. Keep current
+worker-facing/delegation/operator routes: they are distinct credentials for one
+local application, not duplicate deployments.

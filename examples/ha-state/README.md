@@ -26,15 +26,17 @@ event-schema fields. Replay does not deliver to CMA or call any model.
 
 To deploy, copy the configuration outside the checkout, set its source URI,
 subject selector and rules to match your installation, and provide
-`PIPELINE_CONFIG_FILE` when rendering. Configure HA Event Relay's event bus
+`pipeline_config` in the [HA add-on](../../docs/home-assistant.md), or
+`PIPELINE_CONFIG_FILE` when rendering an optional cloud app. Configure HA Event Relay's event bus
 source to forward selected `state_changed` events to this app's authenticated
 `/ingest`. Its envelope type is `homeassistant.state_changed`, source is
 `urn:homeassistant:event_bus:<relay-source-id>`, and subject is the entity ID.
 Use the exact relay ID in the private pipeline configuration. Keep the relay's
 entity allowlist narrow. The app applies its own independent field filters.
 
-Supply `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID`, and mounted `CMA_HMAC_SECRET` for your
-own channel. Configure its existing CMA Agent with
+Supply your own channel URL, HMAC key ID and secret through the matching
+HA options, or `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID` and mounted
+`CMA_HMAC_SECRET` on a cloud deployment. Configure its existing CMA Agent with
 [worker-prompt.md](worker-prompt.md) and only its required destination grants.
 The optional callback uses a distinct `WORKER_TOKEN` and owner-provided
 `WORKER_SERVICE`; no worker service is needed for forwarding alone.
