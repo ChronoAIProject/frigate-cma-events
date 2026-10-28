@@ -29,6 +29,8 @@ class EvidenceOptions:
     jpeg_quality: int = 92
     sample_frames: int = 24
     selected_frames: int = 12
+    tail_coverage_frames: int = 2
+    tail_coverage_seconds: float = 180
     burst_seconds: float = 12
     sampling_seconds: float = 35
     density_weight: float = 0.25
@@ -42,7 +44,7 @@ class EvidenceOptions:
         if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
             raise ValueError("Evidence options require finite numeric values")
         if any(type(getattr(self, name)) is not int for name in (
-                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames")):
+                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames", "tail_coverage_frames")):
             raise ValueError("Evidence dimensions, quality and frame counts require integers")
         if not 0 <= self.crop_padding <= 0.15:
             raise ValueError("EVIDENCE_CROP_PADDING must be between 0 and 0.15")
@@ -52,6 +54,8 @@ class EvidenceOptions:
             raise ValueError("EVIDENCE_JPEG_QUALITY must be between 60 and 95")
         if not 6 <= self.sample_frames <= 48 or not 3 <= self.selected_frames <= min(12, self.sample_frames):
             raise ValueError("Evidence requires 6..48 samples and 3..12 selected frames, not more than samples")
+        if not 1 <= self.tail_coverage_frames <= self.sample_frames // 3 or not 1 <= self.tail_coverage_seconds <= 3600:
+            raise ValueError("Tail coverage must fit the bounded sample budget and a 1..3600 second window")
         if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
             raise ValueError("Invalid evidence burst or sampling time budget")
         if any(not finite(v) or not 0 <= v <= 1 for v in (self.density_weight, self.quality_weight,
@@ -109,42 +113,61 @@ def select_frames(start, end, events):
 
 
 def sample_frames(start, end, events, options):
-    """Bounded broad coverage plus short bursts around object-track anchors.
+    """Bound candidate-interval coverage while preserving object-activity anchors.
 
-    Interleave phases so a slow/missing recording does not consume the entire
-    budget on early activity. Track counts are proposals, not semantic conclusions.
+    Two configurable samples are reserved for the candidate tail, independently
+    of object-track anchors. Sampling remains bounded by the existing frame budget.
     """
     anchors = {f["phase"]: f["timestamp"] for f in select_frames(start, end, events)}
-    first = min(e["start"] for e in events) if events else start
-    last = max(e["end"] for e in events) if events else end
+    activity_start = min(e["start"] for e in events) if events else start
+    activity_end = max(e["end"] for e in events) if events else end
+    duration = end - start
+    tail_start = max(start, end - options.tail_coverage_seconds)
     pools, seen = [], set()
     for i, phase in enumerate(("early", "middle", "late")):
-        lo, hi = first + (last - first) * i / 3, first + (last - first) * (i + 1) / 3
-        anchor = anchors.get(phase, (lo + hi) / 2)
+        lo, hi = start + duration * i / 3, start + duration * (i + 1) / 3
+        activity_lo = activity_start + (activity_end - activity_start) * i / 3
+        activity_hi = activity_start + (activity_end - activity_start) * (i + 1) / 3
+        anchor = anchors.get(phase, (activity_lo + activity_hi) / 2)
+        anchor = min(hi, max(lo, anchor))
         quota = options.sample_frames // 3 + (i < options.sample_frames % 3)
-        spread = max(2, quota - 5)
-        # Reserve broad samples as well as a burst; no assumption that the
-        # turntable completes a revolution in any particular number of seconds.
-        times = [(anchor + k * options.burst_seconds, "anchor_burst") for k in (0, -1, 1, -2, 2)][:quota - spread]
-        times += [(lo + (hi - lo) * (j + 0.5) / spread, "interval_coverage") for j in range(spread)]
-        # Fill unused slots when a burst anchor coincides with a broad sample
-        # or is clipped at a phase boundary, still within the original budget.
-        times += [(lo + (hi - lo) * (j + 0.5) / (quota * 2), "interval_coverage") for j in range(quota * 2)]
+        tail_count = min(options.tail_coverage_frames, quota) if phase == "late" else 0
+        tail_times = []
+        if tail_count:
+            tail_times = [
+                (tail_start + (end - tail_start) * (j / (tail_count - 1) if tail_count > 1 else 1.0),
+                 "tail_coverage")
+                for j in range(tail_count)
+            ]
+        remaining = quota - tail_count
+        spread = min(remaining, max(2, remaining - 5)) if remaining else 0
+        burst_count = remaining - spread
+        bursts = [(anchor + k * options.burst_seconds, "anchor_burst")
+                  for k in (0, -1, 1, -2, 2)][:burst_count]
+        broad = [(lo + (hi - lo) * (j + 0.5) / spread, "interval_coverage")
+                 for j in range(spread)] if spread else []
+        # Tail observations are reserved first so activity bursts cannot consume
+        # the late-phase quota before the candidate boundary is sampled.
+        times = tail_times + bursts + broad
+        # Fill unused slots when a burst or interval point coincides with another
+        # sample; all replacements remain inside the candidate interval.
+        times += [(lo + (hi - lo) * (j + 0.5) / max(1, quota * 2), "interval_coverage")
+                  for j in range(quota * 2)]
         pool = []
         for timestamp, source in times:
             if len(pool) >= quota:
                 break
             timestamp = min(hi, max(lo, timestamp))
-            if round(timestamp, 3) in seen:
+            key = round(timestamp, 3)
+            if key in seen:
                 continue
-            seen.add(round(timestamp, 3))
+            seen.add(key)
             active = [e for e in events if e["start"] <= timestamp <= e["end"]]
             pool.append({"timestamp": timestamp, "phase": phase, "sampling": source,
                          "selection": "object_tracks" if events else "interval_fallback",
                          "tracked_objects": len(active)})
         pools.append(pool)
     return [pool[j] for j in range(max(map(len, pools), default=0)) for pool in pools if j < len(pool)]
-
 
 def visual_metrics(panel, polygon=None):
     """Cheap image-quality/novelty heuristics, not semantic or occlusion detection."""
@@ -177,6 +200,13 @@ def select_diverse_frames(records, limit, options=None):
         picked = []
         peak = max((r["tracked_objects"] for r in pool), default=1) or 1
         floor = max((r["quality"] for r in pool), default=0) * options.minimum_quality_ratio
+        if phase == "late" and quota:
+            tail = [r for r in pool if r.get("sampling") == "tail_coverage" and r["quality"] >= floor]
+            if tail:
+                latest_tail = max(tail, key=lambda r: (r["timestamp"], r["quality"]))
+                latest_tail["visual_novelty"] = None
+                picked.append(latest_tail)
+                pool = [r for r in pool if r is not latest_tail]
         while pool and len(picked) < quota:
             ranked = []
             for record in pool:
@@ -186,7 +216,7 @@ def select_diverse_frames(records, limit, options=None):
                 if picked and novelty < options.duplicate_threshold:
                     continue
                 rank = (options.density_weight * record["tracked_objects"] / peak + options.quality_weight * record["quality"]
-                        + options.novelty_weight * min(1, novelty / options.novelty_scale), record["quality"], -record["timestamp"])
+                        + options.novelty_weight * min(1, novelty / options.novelty_scale), record["quality"], record["timestamp"])
                 ranked.append((rank, record, novelty))
             if not ranked:
                 break
@@ -196,6 +226,12 @@ def select_diverse_frames(records, limit, options=None):
             pool = [r for r in pool if r is not best]
         chosen.extend(picked)
     return sorted(chosen, key=lambda r: r["timestamp"])
+
+
+def unobserved_intervals(start, end, observed_timestamps):
+    """Return intervals between available observations and candidate boundaries."""
+    points = [start, *sorted({t for t in observed_timestamps if start < t < end}), end]
+    return [[left, right] for left, right in zip(points, points[1:]) if right > left]
 
 
 class FrigateEvidence:
@@ -364,6 +400,12 @@ class FrigateEvidence:
             raise EvidenceUnavailable("historical_frames_unavailable")
         if missing:
             warnings.append("Some candidate historical frames are unavailable; coverage is incomplete.")
+        tail_requested = sorted({s["timestamp"] for s in selections if s.get("sampling") == "tail_coverage"})
+        tail_available = sorted({r["timestamp"] for r in records if r.get("sampling") == "tail_coverage"})
+        tail_available_keys = {round(t, 3) for t in tail_available}
+        tail_missing = [t for t in tail_requested if round(t, 3) not in tail_available_keys]
+        if not candidate.get("test") and tail_requested and not tail_available:
+            warnings.append("No usable candidate-tail frame was captured; tail coverage is unavailable.")
         selected = records if candidate.get("test") else select_diverse_frames(records, self.options.selected_frames, self.options)
         annotations, images = [], []
         for offset in range(0, len(selected), 4):
@@ -399,6 +441,16 @@ class FrigateEvidence:
                 "evidence_version": self.version, "frames": annotations, "evidence_budget": budget,
                 "sampling": {"planned": len(selections), "attempted": attempted, "available": len(records),
                              "selected": len(selected), "discarded": len(records) - len(selected)},
+                "coverage": {"candidate_interval": {"start": start, "end": end},
+                             "observed_timestamps": sorted({r["timestamp"] for r in records}),
+                             "missing_timestamps": sorted(set(missing)),
+                             "unobserved_intervals": unobserved_intervals(
+                                 start, end, [r["timestamp"] for r in records]),
+                             "tail_window": {"start": max(start, end - self.options.tail_coverage_seconds), "end": end},
+                             "tail_requested_timestamps": tail_requested,
+                             "tail_available_timestamps": tail_available,
+                             "tail_missing_timestamps": tail_missing,
+                             "tail_available": bool(tail_available) if not candidate.get("test") else None},
                 "crop_normalized": crop, "warnings": warnings,
                 "test": bool(candidate.get("test")),
                 "cautions": ["Activity phases do not establish a real-world outcome.",
