@@ -157,7 +157,7 @@ def sample_frames(start, end, events, options):
         for timestamp, source in times:
             if len(pool) >= quota:
                 break
-            timestamp = min(hi, max(lo, timestamp))
+            timestamp = min(end, max(start, timestamp)) if source == "tail_coverage" else min(hi, max(lo, timestamp))
             key = round(timestamp, 3)
             if key in seen:
                 continue
@@ -404,9 +404,10 @@ class FrigateEvidence:
         tail_available = sorted({r["timestamp"] for r in records if r.get("sampling") == "tail_coverage"})
         tail_available_keys = {round(t, 3) for t in tail_available}
         tail_missing = [t for t in tail_requested if round(t, 3) not in tail_available_keys]
-        if not candidate.get("test") and tail_requested and not tail_available:
-            warnings.append("No usable candidate-tail frame was captured; tail coverage is unavailable.")
         selected = records if candidate.get("test") else select_diverse_frames(records, self.options.selected_frames, self.options)
+        tail_selected = sorted({r["timestamp"] for r in selected if r.get("sampling") == "tail_coverage"})
+        if not candidate.get("test") and tail_requested and not tail_selected:
+            warnings.append("No usable candidate-tail frame was selected; tail coverage is unavailable.")
         annotations, images = [], []
         for offset in range(0, len(selected), 4):
             page = selected[offset:offset + 4]
@@ -442,15 +443,17 @@ class FrigateEvidence:
                 "sampling": {"planned": len(selections), "attempted": attempted, "available": len(records),
                              "selected": len(selected), "discarded": len(records) - len(selected)},
                 "coverage": {"candidate_interval": {"start": start, "end": end},
-                             "observed_timestamps": sorted({r["timestamp"] for r in records}),
+                             "available_timestamps": sorted({r["timestamp"] for r in records}),
+                             "selected_timestamps": sorted({r["timestamp"] for r in selected}),
                              "missing_timestamps": sorted(set(missing)),
                              "unobserved_intervals": unobserved_intervals(
-                                 start, end, [r["timestamp"] for r in records]),
+                                 start, end, [r["timestamp"] for r in selected]),
                              "tail_window": {"start": max(start, end - self.options.tail_coverage_seconds), "end": end},
                              "tail_requested_timestamps": tail_requested,
                              "tail_available_timestamps": tail_available,
+                             "tail_selected_timestamps": tail_selected,
                              "tail_missing_timestamps": tail_missing,
-                             "tail_available": bool(tail_available) if not candidate.get("test") else None},
+                             "tail_available": bool(tail_selected) if not candidate.get("test") else None},
                 "crop_normalized": crop, "warnings": warnings,
                 "test": bool(candidate.get("test")),
                 "cautions": ["Activity phases do not establish a real-world outcome.",
