@@ -29,8 +29,6 @@ class EvidenceOptions:
     jpeg_quality: int = 92
     sample_frames: int = 24
     selected_frames: int = 12
-    tail_coverage_frames: int = 2
-    tail_coverage_seconds: float = 180
     burst_seconds: float = 12
     sampling_seconds: float = 35
     density_weight: float = 0.25
@@ -39,6 +37,8 @@ class EvidenceOptions:
     duplicate_threshold: float = 0.018
     minimum_quality_ratio: float = 0.6
     novelty_scale: float = 0.12
+    tail_coverage_frames: int = 2
+    tail_coverage_seconds: float = 180
 
     def __post_init__(self):
         if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
