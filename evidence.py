@@ -113,7 +113,7 @@ def select_frames(start, end, events):
 
 
 def sample_frames(start, end, events, options):
-    """Bound candidate-interval coverage while preserving object-activity anchors.
+    """Cover candidate thirds while keeping frame phases relative to activity.
 
     Configured samples are reserved for the candidate tail, independently
     of object-track anchors. Sampling remains bounded by the existing frame budget.
@@ -121,17 +121,24 @@ def sample_frames(start, end, events, options):
     anchors = {f["phase"]: f["timestamp"] for f in select_frames(start, end, events)}
     activity_start = min(e["start"] for e in events) if events else start
     activity_end = max(e["end"] for e in events) if events else end
+    activity_duration = activity_end - activity_start
     duration = end - start
     tail_start = max(start, end - options.tail_coverage_seconds)
+    burst_targets = [[], [], []]
+    offsets = (0, -1, 1, -2, 2)
+    for anchor_index, phase in enumerate(("early", "middle", "late")):
+        anchor = anchors[phase]
+        for offset_index, offset in enumerate(offsets):
+            timestamp = min(end, max(start, anchor + offset * options.burst_seconds))
+            candidate_index = 0 if duration <= 0 else min(
+                2, max(0, int((timestamp - start) / duration * 3)))
+            burst_targets[candidate_index].append((offset_index, anchor_index, timestamp))
+
     pools, seen = [], set()
-    for i, phase in enumerate(("early", "middle", "late")):
+    for i, candidate_phase in enumerate(("early", "middle", "late")):
         lo, hi = start + duration * i / 3, start + duration * (i + 1) / 3
-        activity_lo = activity_start + (activity_end - activity_start) * i / 3
-        activity_hi = activity_start + (activity_end - activity_start) * (i + 1) / 3
-        anchor = anchors.get(phase, (activity_lo + activity_hi) / 2)
-        anchor = min(hi, max(lo, anchor))
         quota = options.sample_frames // 3 + (i < options.sample_frames % 3)
-        tail_count = min(options.tail_coverage_frames, quota) if phase == "late" else 0
+        tail_count = min(options.tail_coverage_frames, quota) if candidate_phase == "late" else 0
         tail_times = []
         if tail_count:
             tail_times = [
@@ -139,32 +146,38 @@ def sample_frames(start, end, events, options):
                  "tail_coverage")
                 for j in range(tail_count)
             ]
-        remaining = quota - tail_count
-        spread = min(remaining, max(2, remaining - 5)) if remaining else 0
-        burst_count = remaining - spread
-        bursts = [(anchor + k * options.burst_seconds, "anchor_burst")
-                  for k in (0, -1, 1, -2, 2)][:burst_count]
-        broad = [(lo + (hi - lo) * (j + 0.5) / spread, "interval_coverage")
-                 for j in range(spread)] if spread else []
-        # Tail observations are reserved first so activity bursts cannot consume
-        # the late-phase quota before the candidate boundary is sampled.
+        broad_count = min(2 if candidate_phase == "late" else 3, quota - tail_count)
+        burst_count = max(0, quota - tail_count - broad_count)
+        bursts = [(timestamp, "anchor_burst")
+                  for _, _, timestamp in sorted(burst_targets[i])[:burst_count]]
+        broad = [(lo + (hi - lo) * (j + 0.5) / broad_count, "interval_coverage")
+                 for j in range(broad_count)] if broad_count else []
+        # Reserve tail observations before anchor bursts or broad samples.
         times = tail_times + bursts + broad
-        # Fill unused slots when a burst or interval point coincides with another
-        # sample; all replacements remain inside the candidate interval.
+        # Fill slots when anchors or interval points coincide, staying within the
+        # full candidate interval and preserving the source-frame budget.
         times += [(lo + (hi - lo) * (j + 0.5) / max(1, quota * 2), "interval_coverage")
                   for j in range(quota * 2)]
         pool = []
         for timestamp, source in times:
             if len(pool) >= quota:
                 break
-            timestamp = min(end, max(start, timestamp)) if source == "tail_coverage" else min(hi, max(lo, timestamp))
+            timestamp = min(end, max(start, timestamp))
             key = round(timestamp, 3)
             if key in seen:
                 continue
             seen.add(key)
+            if activity_duration <= 0:
+                phase = "early" if timestamp <= activity_start else "late"
+            elif timestamp <= activity_start + activity_duration / 3:
+                phase = "early"
+            elif timestamp <= activity_start + 2 * activity_duration / 3:
+                phase = "middle"
+            else:
+                phase = "late"
             active = [e for e in events if e["start"] <= timestamp <= e["end"]]
-            pool.append({"timestamp": timestamp, "phase": phase, "sampling": source,
-                         "selection": "object_tracks" if events else "interval_fallback",
+            pool.append({"timestamp": timestamp, "phase": phase, "candidate_phase": candidate_phase,
+                         "sampling": source, "selection": "object_tracks" if events else "interval_fallback",
                          "tracked_objects": len(active)})
         pools.append(pool)
     return [pool[j] for j in range(max(map(len, pools), default=0)) for pool in pools if j < len(pool)]
@@ -194,19 +207,24 @@ def select_diverse_frames(records, limit, options=None):
     """Keep quality and complementary views within every activity phase."""
     options = options or EvidenceOptions()
     chosen = []
+    tail_record = None
+    tail_candidates = [r for r in records if r.get("sampling") == "tail_coverage"]
+    if tail_candidates and limit:
+        tail_phase = max(tail_candidates, key=lambda r: (r["timestamp"], r["quality"]))["phase"]
+        phase_pool = [r for r in records if r["phase"] == tail_phase]
+        floor = max((r["quality"] for r in phase_pool), default=0) * options.minimum_quality_ratio
+        usable_tail = [r for r in tail_candidates if r["phase"] == tail_phase and r["quality"] >= floor]
+        if usable_tail:
+            tail_record = max(usable_tail, key=lambda r: (r["timestamp"], r["quality"]))
+            tail_record["visual_novelty"] = None
+            chosen.append(tail_record)
     for i, phase in enumerate(("early", "middle", "late")):
-        pool = [r for r in records if r["phase"] == phase]
+        pool = [r for r in records if r["phase"] == phase and r is not tail_record]
         quota = limit // 3 + (i < limit % 3)
+        quota = max(0, quota - sum(r["phase"] == phase for r in chosen))
         picked = []
         peak = max((r["tracked_objects"] for r in pool), default=1) or 1
         floor = max((r["quality"] for r in pool), default=0) * options.minimum_quality_ratio
-        if phase == "late" and quota:
-            tail = [r for r in pool if r.get("sampling") == "tail_coverage" and r["quality"] >= floor]
-            if tail:
-                latest_tail = max(tail, key=lambda r: (r["timestamp"], r["quality"]))
-                latest_tail["visual_novelty"] = None
-                picked.append(latest_tail)
-                pool = [r for r in pool if r is not latest_tail]
         while pool and len(picked) < quota:
             ranked = []
             for record in pool:
