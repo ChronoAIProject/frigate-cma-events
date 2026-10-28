@@ -115,7 +115,7 @@ def select_frames(start, end, events):
 def sample_frames(start, end, events, options):
     """Bound candidate-interval coverage while preserving object-activity anchors.
 
-    Two configurable samples are reserved for the candidate tail, independently
+    Configured samples are reserved for the candidate tail, independently
     of object-track anchors. Sampling remains bounded by the existing frame budget.
     """
     anchors = {f["phase"]: f["timestamp"] for f in select_frames(start, end, events)}
