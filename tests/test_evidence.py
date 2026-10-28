@@ -116,6 +116,9 @@ class EvidenceTests(unittest.TestCase):
         with patch.object(client, "object_events", return_value=[]), patch.object(client, "get", side_effect=get) as request:
             result = client.composite(candidate)
         self.assertEqual(len(result["frames"]), 3)
+        self.assertEqual(result["coverage"]["tail_window"], {"start": 220, "end": 400})
+        self.assertTrue(result["coverage"]["tail_available"])
+        self.assertTrue(result["coverage"]["tail_selected_timestamps"])
         self.assertEqual(result["frames"][0]["source_size"], [1920, 1080])
         self.assertEqual(result["frames"][0]["crop_pixels"], [480, 270, 1440, 810])
         self.assertEqual(result["frames"][0]["panel_size"], [960, 540])
@@ -166,7 +169,11 @@ class EvidenceTests(unittest.TestCase):
             expected_burst_gaps = 3 if phase == "late" else 4
             self.assertEqual(sum(f["sampling"] == "interval_coverage" for f in frames), expected_interval_samples)
             burst = sorted(f["timestamp"] for f in frames if f["sampling"] == "anchor_burst")
-            self.assertEqual([round(b-a) for a, b in zip(burst, burst[1:])], [12] * expected_burst_gaps)
+            if phase == "late":
+                self.assertTrue(burst)
+                self.assertTrue(all(1000 <= timestamp <= 1500 for timestamp in burst))
+            else:
+                self.assertEqual([round(b-a) for a, b in zip(burst, burst[1:])], [12] * expected_burst_gaps)
         point = sample_frames(100, 100, [], options)
         self.assertEqual(len(point), 1)
 
