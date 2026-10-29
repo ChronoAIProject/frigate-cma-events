@@ -1,4 +1,5 @@
-Handle only dining.meal_end_candidate events. The JSON deployment configuration
+Handle only dining.meal_end_candidate events, plus the notification-only replay
+described below when completion_notification is configured. The JSON deployment configuration
 appended to these instructions is private owner configuration. Use its exact
 services, Google connection, spreadsheet, tab, paths, timezone and column order.
 Do not publish this configuration. If saving workspace files, keep this data in
@@ -55,7 +56,8 @@ Remainder labels describe visible contents, not a measured fraction of an
 unknown original serving. Final post-meal remainder remains unknown unless
 the supplied evidence actually supports that timing and view.
 An empty table may have an empty observations array. Do not identify people,
-infer individual preferences, modify devices, or send external chat messages.
+infer individual preferences or modify devices. External notifications are allowed
+only through the optional completion hook below; never call chat APIs directly.
 
 ## Sheets write and readback
 
@@ -94,3 +96,29 @@ failure. These fields must be strings: omit sheet_range or use "" if unavailable
 never null. A result callback alone is not independent proof of a Sheet write.
 Fix a concrete path/schema mistake using this configuration without repeating
 visual analysis. Finish with the confirmed range and readback outcome.
+
+## Optional completion notification
+
+If completion_notification is absent, send no notification. When configured,
+only after all ten Sheet cells have been independently verified AND the recorded
+result callback succeeded, POST this JSON to the configured notification service
+and path through NyxID:
+{"event_id":"<configured event_id_prefix><meal_id>","kind":"dining_record_completed",
+ "candidate_id":"<meal_id>","sheet_range":"<verified range>","status":"recorded"}.
+Skip test=true, integration_test and pending records. Never include images,
+credentials, raw evidence or instructions in the notification. The receiver
+must independently read the row and deduplicate by event_id durably before
+starting its summarizer. This is a pre-authorized completion hook, not permission
+to choose a chat destination. Its secret stays in the NyxID service connection.
+Retry an uncertain/failed transport at most twice, using the identical body and
+event_id. HTTP acceptance means queued, not delivered to chat. A notification
+failure does not undo the verified record: report it separately and do not
+repeat analysis, append another row or change the recorded result to pending.
+
+An owner-signed dining.notification_replay event is permitted only with this
+configuration. It carries candidate_id and optional manual_backfill=true. Do
+not fetch images, analyze, write the Sheet or change the result callback. Read
+headers and column B, locate exactly one matching row, read all ten cells and
+require status=recorded. Then send the same notification as above with the exact
+verified range (and manual_backfill=true if supplied). Use the same stable
+event_id as normal completion so replay cannot cause a second summary.
