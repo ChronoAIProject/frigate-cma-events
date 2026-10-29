@@ -20,6 +20,7 @@ from pymongo.errors import PyMongoError
 
 from aggregation import Aggregator, Rules
 from config import Config
+from cma_context import ContextCleanup
 from evidence import EvidenceUnavailable, FrigateEvidence
 from pipeline import Pipeline
 
@@ -78,6 +79,8 @@ def check_id(value):
 class State:
     def __init__(self, config):
         self.config = config
+        self.context_cleanup = (ContextCleanup(json.loads(config.cma_context_config), config.cma_context_token)
+                                if config.cma_context_config else None)
         self.pipeline = config.pipeline
         self.lock = threading.RLock()
         self.engines = {}
@@ -159,7 +162,8 @@ class State:
             return {"mode": "observe", "model_calls": 0, "bindings": len(self.engines),
                     "decisions": sum(e.db.execute("SELECT count(*) FROM decisions").fetchone()[0] for e in self.engines.values()),
                     "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in self.engines.values()),
-                    "cma_deliveries": counts}
+                    "cma_deliveries": counts,
+                    "context_cleanup": dict(self.context_cleanup.status) if self.context_cleanup else {"enabled": False}}
 
     def stamp_rules(self, engine):
         if self.config.legacy_rules_document is not None:
@@ -526,18 +530,30 @@ def create_app(config=None):
                     print("pipeline health " + json.dumps(app.state.worker.status(), sort_keys=True), flush=True)
                     next_report = time.monotonic() + 60
 
+        async def cleanup():
+            while True:
+                if app.state.worker.context_cleanup:
+                    await asyncio.to_thread(app.state.worker.context_cleanup.run)
+                await asyncio.sleep(60)
+
+        cleanup_task = asyncio.create_task(cleanup())
         task = asyncio.create_task(timer())
         try:
             yield
         finally:
             task.cancel()
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
             try:
                 await task
             except asyncio.CancelledError:
                 pass
             app.state.worker.close()
 
-    app = FastAPI(title="CMA Event Pipeline", version="0.2.2", lifespan=lifespan,
+    app = FastAPI(title="CMA Event Pipeline", version="0.2.3", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -580,7 +596,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.2.2", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.2.3", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")

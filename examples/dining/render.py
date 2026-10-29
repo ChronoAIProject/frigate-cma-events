@@ -133,4 +133,4 @@ if __name__ == "__main__":
         write_bundle(args.output_dir, bundle(args.image, os.environ))
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
-    print("Wrote private bundle. Fill secret placeholders and the ready Agent ID before enabling the relay.")
+    print("Wrote private bundle. Fill secret placeholders and create the profile-managed per-event channel before enabling the relay.")

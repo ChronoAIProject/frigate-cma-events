@@ -140,7 +140,7 @@ worker-facing service, model, owner and Sheet settings:
   `system_prompt`, as used by the cloud renderer below. The service list includes
   only the configured evidence, Google Workspace and model services.
 - Resolve the channel template's name/owner/model/service/prompt/key-ID variables
-  privately. Reserve one `record_id` UUID. Leave the actual ready Agent ID and
+  privately. Reserve one `record_id` UUID. Leave the
   credential placeholders for the lifecycle steps below.
 
 An existing installation can reuse its private worker/channel/Sheet bundle and
@@ -247,64 +247,35 @@ gets this HTTP service and Google Workspace access; the Frigate/node key stays
 with the aggregation app. CMA managed keys currently do not support granting
 the backing node merely by approving its service; see [CMA #1111](https://github.com/ChronoAIProject/cma/issues/1111).
 
-## 4. Create the worker, then attach its channel
+## 4. Create a profile-managed per-event channel
 
-Use your current owner NyxID authorization through the supported CMA public API.
-Keep the Authorization header in a private 0600 file (`owner.headers`) rather
-than putting a token on the command line. Its line must be
-`Authorization: Bearer <OWNER_ACCESS_TOKEN>`. Keep request bodies, receipts and
-idempotency keys in `DINING_SITE_DIR`.
+Use current owner NyxID authorization through the supported public API. Keep
+bearer headers, request bodies, receipts and idempotency keys in the private site
+directory. Complete CMA's normal NyxID sign-in once for renewable sandbox access.
 
-1. Complete CMA's normal NyxID browser sign-in once to establish renewable
-   sandbox authorization. [CMA's REST guide](https://github.com/ChronoAIProject/cma/blob/main/docs/API_REST.md)
-   describes this prerequisite. A normal NyxID CLI login alone can leave
-   lifecycle creation waiting for that renewable connection.
-2. POST `worker-request.json` to `$CMA_API_BASE/agents` with a stable
-   `Idempotency-Key`. Save the exact request and response. Poll
-   `$CMA_API_BASE/agent-lifecycle/{operation_id}` until `status=succeeded`, then
-   verify the returned Agent is `ready`. If waiting for connection, finish sign-in
-   and resume using the original request/idempotency key.
+1. Use the generated `channel-request.json` profile: exact worker prompt, selected
+   services, model and dedicated directory workspace. Keep `provider` as
+   `{"slug":"cma_codex"}` (profile target) and `partition.key` as `per_event`.
+   Do not create and borrow one existing Agent for all meals. The provider
+   provisions a separate native Agent/worktree for each stable event ID.
+2. Create a distinct NyxID channel binding key authorized for selected services.
+   Fill `credentials.agent_key` and the matching HMAC secret. Do not reuse app,
+   source, sandbox-managed or other binding credentials.
+3. POST to `$CMA_GATEWAY_BASE/channels` with the generated record UUID, exact
+   request and stable idempotency key. Preserve the returned receipt. Recover an
+   uncertain response through `GET /channel-records/{record_id}` or exact retry.
+4. Verify ready state and provider field decisions. A ready channel does not
+   prove that a visual task has executed successfully. Copy the returned
+   `endpoints.custom_event_url` verbatim to `cma_event_url` in HA options.
+5. After the first task, obtain the native Agent's dedicated workspace ID and
+   the channel's binding ID. Configure optional scoped idle cleanup as described
+   in the root guide and HA add-on guide. Keep the management key only on HA.
+   The Sheet and pipeline callbacks retain business history after Agent cleanup.
 
-   ```sh
-   curl --fail-with-body --header "@$DINING_SITE_DIR/owner.headers" \
-     --header 'Content-Type: application/json' \
-     --header 'Idempotency-Key: YOUR_STORED_WORKER_OPERATION_ID' \
-     --data-binary "@$DINING_SITE_DIR/bundle/worker-request.json" \
-     "$CMA_API_BASE/agents" > "$DINING_SITE_DIR/worker-response.json"
-   ```
-
-3. Put the actual ready Agent ID in `channel-request.json` at
-   `provider.target.agent_id`. The generated profile/prompt is already supplied
-   to the Agent at creation: an existing-Agent channel retains that Agent's
-   configuration instead of applying the channel profile over it.
-4. Create a **distinct NyxID key for this channel binding**, authorized for the
-   selected services, and put it in `credentials.agent_key`. Do not reuse the
-   app's provider token, the Frigate key, a CMA-managed sandbox key, or another
-   binding's key. Fill the channel HMAC secret from the app's matching secret.
-5. POST the completed request to `$CMA_GATEWAY_BASE/channels`, preserving its
-   generated `record_id`, exact body and a stable idempotency key. For example:
-
-   ```sh
-   curl --fail-with-body --header "@$DINING_SITE_DIR/owner.headers" \
-     --header 'Content-Type: application/json' \
-     --header "Idempotency-Key: YOUR_STORED_CHANNEL_OPERATION_ID" \
-     --data-binary "@$DINING_SITE_DIR/bundle/channel-request.json" \
-     "$CMA_GATEWAY_BASE/channels" > "$DINING_SITE_DIR/channel-response.json"
-   ```
-
-6. Verify `definition.creation.ready=true` and inspect provider field decisions.
-   Refusals saying the existing Agent's configuration/credentials are retained
-   are expected; a ready channel alone does not prove a successful model task.
-   After an uncertain create, recover with `GET /channel-records/{record_id}`
-   or repeat the exact original request. Do not invent another identity merely
-   because a response was lost.
-7. Copy `endpoints.custom_event_url` verbatim into HA's `cma_event_url`, or
-   `CMA_EVENT_URL` in private `app-spec.json` for a cloud deployment. Preserve
-   opaque channel references; do not retype or shorten them.
-
-Service access is chosen during normal Agent creation. Changes to an existing
-Agent may currently require web approval even for an already-authorized owner
-API client; see [CMA #1110](https://github.com/ChronoAIProject/cma/issues/1110).
+The generated `worker-request.json` remains an optional standalone-agent example;
+creating it is unnecessary for the profile-managed event channel. Service scope
+is supplied by the channel profile. Supported owner credentials and operation
+permissions still apply; no browser/machine capability is required locally.
 
 ## 5. Deploy, initialize the Sheet and enable the relay
 
@@ -422,3 +393,9 @@ day with an hour cooldown. These are deployment parameters, not food semantics.
 - Full retirement: disable the application Relay route before removing its
   Pipeline/worker/channel, then intentionally archive/remove its private state
   and grants. Other configured workflows must remain unaffected.
+
+Independent meals require a profile-managed CMA target and `per_event` partition.
+The channel template now uses these defaults. Do not attach all meals to a
+single existing Agent: gateway partitioning cannot reset that Agent's context.
+Use the optional scoped CMA cleanup described in the root guide to retire idle
+per-event runtimes; keep durable meal history in the Sheet and local callbacks.
