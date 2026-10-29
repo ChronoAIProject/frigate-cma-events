@@ -268,7 +268,7 @@ directory. Complete CMA's normal NyxID sign-in once for renewable sandbox access
    prove that a visual task has executed successfully. Copy the returned
    `endpoints.custom_event_url` verbatim to `cma_event_url` in HA options.
 5. After the first task, obtain the native Agent's dedicated workspace ID and
-   the channel's binding ID. Configure optional scoped idle cleanup as described
+   the native immutable Agent profile ID. Configure optional scoped idle cleanup as described
    in the root guide and HA add-on guide. Keep the management key only on HA.
    The Sheet and pipeline callbacks retain business history after Agent cleanup.
 
