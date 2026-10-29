@@ -30,7 +30,8 @@ DEFAULTS = {
 }
 OPTIONAL = ("TARGET_ORG_ID", "PERSISTENCE_BACKEND", "CMA_EVENT_URL", "MINIMUM_SECONDS",
             "MAXIMUM_SECONDS", "MERGE_SECONDS", "DELIVERY_GRACE_SECONDS", "COOLDOWN_SECONDS",
-            "MAX_PER_DAY", "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_TIMEOUT_SECONDS", "SHEET_COLUMNS_JSON")
+            "MAX_PER_DAY", "HEARTBEAT_SECONDS", "TICK_SECONDS", "CMA_TIMEOUT_SECONDS", "SHEET_COLUMNS_JSON",
+            "NOTIFY_SERVICE", "NOTIFY_PATH")
 OPTIONAL += tuple("EVIDENCE_" + field.name.upper() for field in fields(EvidenceOptions))
 
 
@@ -75,6 +76,9 @@ def bundle(image, environ):
            "ids_path": base + quote(tab + "B:B", safe=""),
            "read_path": base + quote(tab + "A:J", safe=""),
            "append_path": base + quote(tab + "A:J", safe="") + ":append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"}
+    if params.get("NOTIFY_SERVICE"):
+        cfg["completion_notification"] = {"service": params["NOTIFY_SERVICE"], "path": params.get("NOTIFY_PATH", ""),
+                                          "event_id_prefix": "dining-summary-v1:"}
     prompt = (HERE / "worker-prompt.md").read_text() + "\n\nPrivate deployment configuration:\n" + json.dumps(cfg, ensure_ascii=False)
     rules = {"camera": params["CAMERA"], "seats_zone": params["SEATS_ZONE"], "table_zone": params["TABLE_ZONE"]}
     for field in fields(Rules):
@@ -90,10 +94,15 @@ def bundle(image, environ):
     params.update(CHANNEL_RECORD_ID=str(uuid.uuid4()), WORKER_PROMPT=prompt)
     relay = expand(json.loads((HERE / "relay-options.example.json").read_text()), params)
     relay["mqtt_sources"][0].update(port=port, tls=params["MQTT_TLS"] == "true")
+    services = [params["EVIDENCE_SERVICE"], params["SHEETS_SERVICE"]]
+    if params.get("NOTIFY_SERVICE"):
+        services.append(params["NOTIFY_SERVICE"])
+    channel = expand(json.loads((HERE / "channel.example.json").read_text()), params)
+    channel["profile"]["permission"]["service_scope"] = list(dict.fromkeys(services))
     worker = {"name": params["WORKER_NAME"], "profile": {
         "model": params["MODEL_NAME"], "reasoning_effort": params["MODEL_THINKING_EFFORT"],
         "permission_mode": "autonomous", "permissions": {"services": list(dict.fromkeys(
-            [params["EVIDENCE_SERVICE"], params["SHEETS_SERVICE"], params["MODEL_SERVICE"]]))},
+            services + [params["MODEL_SERVICE"]]))},
         "system_prompt": prompt}}
     memory = ("Use the owner's configured dining Sheet below to answer dining-record questions. "
               "Include only rows with status=recorded in real meal summaries. integration_test rows are validation only. "
@@ -103,7 +112,7 @@ def bundle(image, environ):
               + json.dumps(cfg, ensure_ascii=False))
     return {"app-spec.json": render_app(image, params["APP_SERVICE"], params), "pipeline.json": pipeline,
             "relay-options.json": relay, "dining-config.json": cfg, "worker-request.json": worker,
-            "channel-request.json": expand(json.loads((HERE / "channel.example.json").read_text()), params),
+            "channel-request.json": channel,
             "app-secrets.json": json.loads((HERE / "app-secrets.example.json").read_text()),
             "sheet-schema.json": schema, "sheet-header.json": {"majorDimension": "ROWS", "values": [schema["columns"]]},
             "assistant-memory.md": memory}

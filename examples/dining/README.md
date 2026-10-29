@@ -354,8 +354,8 @@ Poll `GET /api/results/{meal_id}` with the operator header until the worker
 reports `integration_test` and its verified range. Independently read that range
 and column B through Google Workspace: exactly one matching ID, ten matching
 cells and status `integration_test`. Ask the existing NyxBot to query that same
-ID and exclude it from real meal counts. No outbound chat notification is part
-of this example. If admission times out, inspect existing deliveries before
+ID and exclude it from real meal counts. Tests never send completion notifications.
+If admission times out, inspect existing deliveries before
 submitting another validation: `/api/validation` does not have an idempotency
 key contract and a second POST can create a second test.
 
@@ -365,6 +365,46 @@ eight minutes of qualifying person/seat review intervals and tableware evidence,
 a five-minute quiet window and delivery grace. Allow extra time for Frigate to
 close its review and for worker execution. Candidates are limited to three per
 day with an hour cooldown. These are deployment parameters, not food semantics.
+
+### Optional completion summaries
+
+Set `NOTIFY_SERVICE` at bundle rendering time to enable a completion hook. Leave
+it unset to keep notifications disabled and grant no notification service access.
+Create an owner-private NyxID connection whose fixed endpoint is a webhook,
+with its authentication secret stored in the connection, not the worker prompt.
+Use `NOTIFY_PATH` for the hook's relative path when the connection points to its
+parent URL. Verify the exact proxy URL; do not assume an upstream treats a
+trailing slash on an empty path as equivalent to the hook route.
+Grant that one connection to the channel bootstrap key as well as the profile.
+The worker calls it only after a real `recorded` result and all ten Sheet cells
+have been verified. It never calls Telegram or another chat API itself.
+
+The receiver must durably deduplicate `event_id` before starting a summary run.
+The contract is `kind=dining_record_completed`, `candidate_id`, `sheet_range`,
+`status=recorded`, and `event_id=dining-summary-v1:<candidate_id>`. An uncertain
+transport is retried with the same ID and body at most twice. Notification failure
+does not repeat visual analysis or Sheet writes. HTTP acceptance proves queueing,
+so verify the receiver's run and outbound delivery receipt during installation.
+
+For example, a NyxID bearer-authenticated webhook trigger can target an existing
+NyxBot, use `thread_policy=new` and `overlap=queue`, and bind `deliver_to` to an
+owner-authorized chat. Give the summarizer fixed read-only instructions to locate
+the unique recorded row and preserve meal/post-meal uncertainty. Its final answer
+is automatically delivered; do not also call a posting tool. Keep bot/chat IDs,
+trigger URLs and secrets in private deployment configuration. An owner-signed
+`dining.notification_replay` event can verify an existing row without fetching
+images or writing data; `manual_backfill=true` labels the initial delivery as a
+historical notification test. Its stable notification ID also prevents a replay
+from sending a second summary.
+
+Keep the hook disabled until that full acceptance check succeeds. Upstream
+[CMA #1231](https://github.com/ChronoAIProject/cma/issues/1231) tracks a failure
+when expanding channel scope to a personal custom connection, and
+[NyxID #2099](https://github.com/ChronoAIProject/NyxID/issues/2099) tracks model
+authorization failures in new webhook automation threads. Queue acceptance and
+local example tests do not establish that either deployed path works. Preserve
+the original worker scope and keep maintenance summaries in a private pending
+outbox while those conditions apply; do not broaden grants as a workaround.
 
 ## Troubleshooting and maintenance
 

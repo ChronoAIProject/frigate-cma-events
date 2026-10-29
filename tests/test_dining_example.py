@@ -48,6 +48,22 @@ class DiningExampleTests(unittest.TestCase):
         self.assertEqual(channel["partition"]["key"], "per_event")
         self.assertEqual(channel["profile"]["context"]["system_prompt"], worker["system_prompt"])
         self.assertNotEqual(channel["credentials"]["agent_key"], payloads["app-secrets.json"]["PROVIDER_TOKEN"])
+        self.assertNotIn("completion_notification", cfg)
+
+    def test_optional_notification_grants_match_without_copying_secret(self):
+        payloads = bundle("synthetic-image", {**self.parameters(),
+                         "NOTIFY_SERVICE": "synthetic-notify", "NOTIFY_PATH": "synthetic-hook",
+                         "NOTIFY_SECRET": "do-not-copy"})
+        self.assertNotIn("do-not-copy", json.dumps(payloads))
+        cfg = payloads["dining-config.json"]
+        self.assertEqual(cfg["completion_notification"], {
+            "service": "synthetic-notify", "path": "synthetic-hook", "event_id_prefix": "dining-summary-v1:"})
+        worker = payloads["worker-request.json"]["profile"]
+        channel = payloads["channel-request.json"]["profile"]
+        self.assertEqual(worker["permissions"]["services"],
+                         channel["permission"]["service_scope"] + ["chrono-llm-public"])
+        self.assertIn("synthetic-notify", channel["permission"]["service_scope"])
+        self.assertEqual(worker["system_prompt"], channel["context"]["system_prompt"])
 
     def test_existing_sheet_can_supply_its_own_ten_headers(self):
         columns = ["synthetic-column-" + str(i) for i in range(10)]
