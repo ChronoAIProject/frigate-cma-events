@@ -46,9 +46,10 @@ class ContextCleanup:
 
     def call(self, base, path, method="GET"):
         headers = {"Authorization": "Bearer " + self.token, "User-Agent": "cma-context-cleanup/1"}
-        if method == "DELETE":
-            headers["Idempotency-Key"] = "context-cleanup-" + path.rsplit("/", 1)[-1]
-        request = Request(base.rstrip("/") + "/" + path, method=method,
+        if method in {"DELETE", "POST"}:
+            headers["Idempotency-Key"] = "context-cleanup-" + method.lower() + "-" + path.replace("/", "-")
+            headers["Content-Type"] = "application/json"
+        request = Request(base.rstrip("/") + "/" + path, method=method, data=b"{}" if method == "POST" else None,
                           headers=headers)
         with self.opener.open(request, timeout=8) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
@@ -96,6 +97,11 @@ class ContextCleanup:
                 continue
             if now - timestamp(detail["updated_at"]) < self.grace:
                 continue
+            if detail["status"] == "ready":
+                self.call(cfg["cma_url"], "agents/" + aid + "/stop", "POST")
+                stopped = self.call(cfg["cma_url"], "agents/" + aid)
+                if stopped["status"] != "stopped":
+                    continue
             self.call(cfg["cma_url"], "agents/" + aid, "DELETE")
             final = self.call(cfg["cma_url"], "agents/" + aid)
             if final["status"] == "deleted":

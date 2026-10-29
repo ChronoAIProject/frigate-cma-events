@@ -11,14 +11,16 @@ class ContextCleanupTests(unittest.TestCase):
         definition = {'provider':{'slug':'cma_codex','target':{'type':target},'agent_profile_ids':['agp_example123']},
                       'partition':{'key':phase},'profile':{}}
         self.deletes = []
+        self.stopped = False
         def call(base, path, method='GET'):
+            if method == 'POST':self.stopped=True;return None
             if method == 'DELETE':self.deletes.append(path);return None
             if path.startswith('channel-records/'):return {'channel_id':'opaque_example', 'definition':definition}
             if path.startswith('channels/'):return {'items':[{'consumers':[{
                 'agent_id':'agt_example123','state':'completed','completed_at':'1970-01-01T00:10:00Z'}]}]}
             if path.startswith('agents?'):return {'items':[{'id':'agt_example123','workspace_id':'wks_example123','profile':{'id':'agp_example123' if owned else 'agp_other12345'},'status':status,'updated_at':'1970-01-01T00:10:00Z'}]}
             if path.endswith('/channel-usage'):return {'bindings':[{'agent_profile_ids':['agp_example123'] if owned else 'another_binding'}]}
-            return {'workspace':{'id':'wks_example123'},'profile':{'id':'agp_example123'},'status':'deleted' if self.deletes else status,'updated_at':'1970-01-01T00:10:00Z'}
+            return {'workspace':{'id':'wks_example123'},'profile':{'id':'agp_example123'},'status':'deleted' if self.deletes else ('stopped' if self.stopped else status),'updated_at':'1970-01-01T00:10:00Z'}
         obj.call = call
         return obj
 
