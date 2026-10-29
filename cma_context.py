@@ -85,7 +85,7 @@ class ContextCleanup:
             pending += 1
             if agent.get("status") not in {"ready", "stopped", "failed"}:
                 continue
-            if now - timestamp(agent["updated_at"]) < self.grace:
+            if agent["status"] != "stopped" and now - timestamp(agent["updated_at"]) < self.grace:
                 continue
             if (agent.get("workspace_id") != cfg["workspace_id"]
                     or agent.get("profile", {}).get("id") not in cfg["agent_profile_ids"]):
@@ -95,7 +95,7 @@ class ContextCleanup:
             detail = self.call(cfg["cma_url"], "agents/" + aid)
             if detail["workspace"]["id"] != cfg["workspace_id"] or detail["status"] not in {"ready", "stopped", "failed"} or detail["profile"]["id"] not in cfg["agent_profile_ids"]:
                 continue
-            if now - timestamp(detail["updated_at"]) < self.grace:
+            if detail["status"] != "stopped" and now - timestamp(detail["updated_at"]) < self.grace:
                 continue
             if detail["status"] == "ready":
                 self.call(cfg["cma_url"], "agents/" + aid + "/stop", "POST")

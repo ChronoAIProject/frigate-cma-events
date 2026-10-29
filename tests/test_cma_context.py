@@ -39,6 +39,11 @@ class ContextCleanupTests(unittest.TestCase):
                 self.assertFalse(self.deletes)
         obj=self.setup_cleanup();obj.run(now=700);self.assertFalse(self.deletes)
 
+    def test_already_stopped_native_resource_can_finish_async_cleanup(self):
+        obj=self.setup_cleanup(status='stopped')
+        obj.run(now=700)
+        self.assertEqual(self.deletes,['agents/agt_example123'])
+
     def test_response_failure_is_reported_without_credentials_or_body(self):
         obj=self.setup_cleanup()
         obj.call=lambda *args: (_ for _ in ()).throw(ValueError('private upstream message'))
