@@ -44,7 +44,8 @@ class DiningExampleTests(unittest.TestCase):
         self.assertIn(json.dumps(cfg, ensure_ascii=False), worker["system_prompt"])
         channel = payloads["channel-request.json"]
         self.assertEqual(UUID(channel["record_id"]).version, 4)
-        self.assertEqual(channel["provider"]["target"]["type"], "existing_agent")
+        self.assertEqual(channel["provider"], {"slug": "cma_codex"})
+        self.assertEqual(channel["partition"]["key"], "per_event")
         self.assertEqual(channel["profile"]["context"]["system_prompt"], worker["system_prompt"])
         self.assertNotEqual(channel["credentials"]["agent_key"], payloads["app-secrets.json"]["PROVIDER_TOKEN"])
 
