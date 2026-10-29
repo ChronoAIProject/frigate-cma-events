@@ -112,8 +112,13 @@ The `frigate` adapter resolves stored candidate IDs only. It reads configured
 object tracks and region geometry, combines broad time coverage with short
 bursts, then ranks native-resolution crops by quality, configured track density
 and visual novelty. Defaults: at most 24 source samples, 12 selected frames and
-three JPEG pages. Static scenes can yield fewer frames. Quality and novelty are
-heuristics, not object identity or semantic recognition.
+three JPEG pages. Two samples are reserved for the candidate tail over the final
+180 seconds; both values are configurable as
+`evidence.options.tail_coverage_frames` and
+`evidence.options.tail_coverage_seconds`. The response reports available and
+selected timestamps, unobserved intervals, and whether tail coverage is available.
+Static scenes can yield fewer frames. Quality and novelty are heuristics, not
+object identity or semantic recognition.
 
 The worker saves `images[]` locally and views each page once within the supplied
 budget. Every selected frame has an ID and actual historical timestamp. Missing
