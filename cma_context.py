@@ -2,7 +2,7 @@
 
 This uses public resource APIs. The management key stays on the local service;
 workers never receive it. Deploy only with a profile target, per_event partition, and its dedicated workspace.
-Cleanup requires matching CMA resource membership and binding authority.
+Cleanup requires matching CMA resource membership and immutable profile identity.
 """
 from datetime import datetime
 import json
@@ -21,16 +21,19 @@ def timestamp(value):
 
 class ContextCleanup:
     def __init__(self, config, token):
-        allowed = {"cma_url", "binding_id", "workspace_id", "grace_seconds"}
+        allowed = {"cma_url", "agent_profile_ids", "workspace_id", "grace_seconds"}
         if not isinstance(config, dict) or set(config) - allowed:
             raise ValueError("Invalid CMA context cleanup configuration")
         for key in ("cma_url",):
             url = urlsplit(config.get(key, ""))
             if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
                 raise ValueError("CMA cleanup requires HTTPS service bases")
-        for key, pattern in (("binding_id", r"bnd_[a-zA-Z0-9]{8,128}"), ("workspace_id", r"wks_[a-zA-Z0-9]{8,128}")):
+        for key, pattern in (("workspace_id", r"wks_[a-zA-Z0-9]{8,128}"),):
             if not re.fullmatch(pattern, config.get(key, "")):
                 raise ValueError("CMA cleanup requires exact channel and dedicated workspace")
+        profiles = config.get("agent_profile_ids")
+        if not isinstance(profiles, list) or not 1 <= len(profiles) <= 8 or any(not isinstance(p, str) or not re.fullmatch(r"agp_[a-zA-Z0-9]{8,128}", p) for p in profiles):
+            raise ValueError("CMA cleanup requires pinned native Agent profile IDs")
         self.grace = config.get("grace_seconds", 600)
         if type(self.grace) is not int or not 300 <= self.grace <= 86400:
             raise ValueError("Invalid CMA cleanup retention")
@@ -43,9 +46,10 @@ class ContextCleanup:
 
     def call(self, base, path, method="GET"):
         headers = {"Authorization": "Bearer " + self.token, "User-Agent": "cma-context-cleanup/1"}
-        if method == "DELETE":
-            headers["Idempotency-Key"] = "context-cleanup-" + path.rsplit("/", 1)[-1]
-        request = Request(base.rstrip("/") + "/" + path, method=method,
+        if method in {"DELETE", "POST"}:
+            headers["Idempotency-Key"] = "context-cleanup-" + method.lower() + "-" + path.replace("/", "-")
+            headers["Content-Type"] = "application/json"
+        request = Request(base.rstrip("/") + "/" + path, method=method, data=b"{}" if method == "POST" else None,
                           headers=headers)
         with self.opener.open(request, timeout=8) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
@@ -65,7 +69,6 @@ class ContextCleanup:
 
     def _run(self, now):
         cfg = self.config
-        binding = cfg["binding_id"]
         page = self.call(cfg["cma_url"], "agents?" + urlencode({"workspace": cfg["workspace_id"], "limit": 50}))
         agents = page.get("items", [])
         if page.get("next_cursor") or len(agents) >= 50:
@@ -82,20 +85,23 @@ class ContextCleanup:
             pending += 1
             if agent.get("status") not in {"ready", "stopped", "failed"}:
                 continue
-            if now - timestamp(agent["updated_at"]) < self.grace:
+            if agent["status"] != "stopped" and now - timestamp(agent["updated_at"]) < self.grace:
                 continue
-            usage = self.call(cfg["cma_url"], "agents/" + aid + "/channel-usage")
-            bindings = usage.get("bindings", [])
-            if (not bindings or any(b.get("binding_id") != binding for b in bindings)
-                    or any(b.get("last_used_at") and now - timestamp(b["last_used_at"]) < self.grace for b in bindings)):
+            if (agent.get("workspace_id") != cfg["workspace_id"]
+                    or agent.get("profile", {}).get("id") not in cfg["agent_profile_ids"]):
                 continue
             # Recheck the resource immediately before mutation; never stop work
-            # or a pending approval, and never act on a borrowed/shared agent.
+            # or a pending approval, and only act on the pinned profile in this dedicated workspace.
             detail = self.call(cfg["cma_url"], "agents/" + aid)
-            if detail["workspace"]["id"] != cfg["workspace_id"] or detail["status"] not in {"ready", "stopped", "failed"}:
+            if detail["workspace"]["id"] != cfg["workspace_id"] or detail["status"] not in {"ready", "stopped", "failed"} or detail["profile"]["id"] not in cfg["agent_profile_ids"]:
                 continue
-            if now - timestamp(detail["updated_at"]) < self.grace:
+            if detail["status"] != "stopped" and now - timestamp(detail["updated_at"]) < self.grace:
                 continue
+            if detail["status"] == "ready":
+                self.call(cfg["cma_url"], "agents/" + aid + "/stop", "POST")
+                stopped = self.call(cfg["cma_url"], "agents/" + aid)
+                if stopped["status"] != "stopped":
+                    continue
             self.call(cfg["cma_url"], "agents/" + aid, "DELETE")
             final = self.call(cfg["cma_url"], "agents/" + aid)
             if final["status"] == "deleted":
