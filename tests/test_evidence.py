@@ -116,6 +116,9 @@ class EvidenceTests(unittest.TestCase):
         with patch.object(client, "object_events", return_value=[]), patch.object(client, "get", side_effect=get) as request:
             result = client.composite(candidate)
         self.assertEqual(len(result["frames"]), 3)
+        self.assertEqual(result["coverage"]["tail_window"], {"start": 220, "end": 400})
+        self.assertTrue(result["coverage"]["tail_available"])
+        self.assertTrue(result["coverage"]["tail_selected_timestamps"])
         self.assertEqual(result["frames"][0]["source_size"], [1920, 1080])
         self.assertEqual(result["frames"][0]["crop_pixels"], [480, 270, 1440, 810])
         self.assertEqual(result["frames"][0]["panel_size"], [960, 540])
@@ -155,12 +158,14 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(samples), 24)
         self.assertEqual([f["phase"] for f in samples[:3]], ["early", "middle", "late"])
         self.assertEqual(len({round(f["timestamp"], 3) for f in samples}), 24)
-        self.assertTrue(all(100 <= f["timestamp"] <= 1000 for f in samples))
+        self.assertTrue(all(0 <= f["timestamp"] <= 1500 for f in samples))
+        tail = [f for f in samples if f["sampling"] == "tail_coverage"]
+        self.assertEqual(len(tail), options.tail_coverage_frames)
+        self.assertGreaterEqual(min(f["timestamp"] for f in tail), 1320)
+        self.assertEqual(max(f["timestamp"] for f in tail), 1500)
         for phase in ("early", "middle", "late"):
-            frames = [f for f in samples if f["phase"] == phase]
-            self.assertEqual(sum(f["sampling"] == "interval_coverage" for f in frames), 3)
-            burst = sorted(f["timestamp"] for f in frames if f["sampling"] == "anchor_burst")
-            self.assertEqual([round(b-a) for a, b in zip(burst, burst[1:])], [12] * 4)
+            self.assertEqual(sum(f["candidate_phase"] == phase for f in samples), 8)
+        self.assertLess(min(f["timestamp"] for f in samples), 150)
         point = sample_frames(100, 100, [], options)
         self.assertEqual(len(point), 1)
 
@@ -183,6 +188,74 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(selected), 9)
         self.assertTrue(all(r["quality"] == 0.8 for r in selected))
         self.assertEqual(len({(r["phase"],r["_signature"]) for r in selected}), 9)
+        late_duplicates = [
+            {"phase": "late", "timestamp": timestamp, "tracked_objects": 1,
+             "quality": 1.0, "_signature": b"same-image"}
+            for timestamp in (2400, 3000, 3599)
+        ]
+        chosen = select_diverse_frames(late_duplicates, 3)
+        self.assertEqual([frame["timestamp"] for frame in chosen], [3599])
+
+    def test_candidate_tail_unavailability_is_reported_without_exceeding_budgets(self):
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera")
+        blob = BytesIO()
+        Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        candidate = {"candidate_id": "synthetic-tail", "subject": "test-camera",
+                     "started_at": 0, "ended_at": 3600}
+        events = [{"start": 0, "end": 1200, "snapshot": 600, "score": 0.9}]
+
+        def get(path, **kwargs):
+            timestamp = float(path.split("/recordings/")[1].split("/")[0])
+            if timestamp >= 3420:
+                raise EvidenceUnavailable("recording_unavailable")
+            return blob.getvalue()
+
+        with patch.object(client, "object_events", return_value=events), \
+                patch.object(client, "crop_bounds", return_value=None), \
+                patch.object(client, "get", side_effect=get):
+            result = client.composite(candidate)
+
+        coverage = result["coverage"]
+        self.assertEqual(coverage["candidate_interval"], {"start": 0, "end": 3600})
+        self.assertEqual(coverage["tail_window"], {"start": 3420, "end": 3600})
+        self.assertTrue(coverage["tail_requested_timestamps"])
+        self.assertEqual(coverage["tail_missing_timestamps"], coverage["tail_requested_timestamps"])
+        self.assertEqual(coverage["tail_selected_timestamps"], [])
+        self.assertFalse(coverage["tail_available"])
+        self.assertEqual(coverage["unobserved_intervals"][-1][1], 3600)
+        self.assertTrue(any("tail coverage is unavailable" in warning for warning in result["warnings"]))
+        self.assertEqual(result["sampling"]["planned"], 24)
+        self.assertEqual(result["evidence_budget"]["max_source_frames"], 24)
+        self.assertEqual(result["evidence_budget"]["max_selected_frames"], 12)
+        self.assertLessEqual(len(result["images"]), 3)
+
+    def test_short_or_disjoint_tracks_cannot_collapse_candidate_coverage(self):
+        options = EvidenceOptions(post_window_seconds=120)
+        for tracks in ([{"start": 100, "end": 100, "snapshot": 100, "score": 1}],
+                       [{"start": 100, "end": 101, "snapshot": 100, "score": 1},
+                        {"start": 199, "end": 200, "snapshot": 200, "score": 1}]):
+            frames = sample_frames(0, 3600, tracks, options)
+            self.assertEqual(len(frames), 24)
+            self.assertEqual(len({f["timestamp"] for f in frames}), 24)
+            records = [{**f, "quality": 1, "_signature": b"same-image"} for f in frames]
+            chosen = select_diverse_frames(records, 12, options)
+            self.assertLess(chosen[0]["timestamp"], 400)
+            self.assertEqual(chosen[-1]["timestamp"], 3720)
+            self.assertIn(3600, [f["timestamp"] for f in chosen])
+            self.assertEqual({f["candidate_phase"] for f in chosen}, {"early", "middle", "late"})
+            # The reserved tail already participates in duplicate screening.
+            self.assertEqual(len(chosen), 4)
+        self.assertEqual(len(sample_frames(100, 100, tracks[:1], EvidenceOptions())), 1)
+
+    def test_bad_boundary_quality_does_not_force_a_blurred_frame(self):
+        records = [{"phase": "late", "timestamp": t, "quality": q,
+                    "tracked_objects": 1, "_signature": b"same-image", "sampling": "tail_coverage"}
+                   for t, q in [(1, 1), (2, 0.01)]]
+        self.assertEqual([r["timestamp"] for r in select_diverse_frames(records, 12)], [1])
+
+    def test_evidence_options_bound_tail_coverage_to_sample_budget(self):
+        with self.assertRaises(ValueError):
+            EvidenceOptions(sample_frames=6, tail_coverage_frames=3)
 
     def test_evidence_pack_limits_pages_and_gives_frames_stable_ids(self):
         client = FrigateEvidence("https://proxy.example/service", "key", "test-camera")

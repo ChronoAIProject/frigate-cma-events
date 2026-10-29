@@ -8,7 +8,7 @@ a private dining-config.json and reusable instructions in AGENTS.md.
 
 Treat activity as a candidate, not proof of a meal or consumption. Use only the
 event's evidence.path through the configured evidence_service. Save its JSON
-in a private file. V3 returns images[]: decode each image_base64 to its own
+in a private file. V3 and later return images[]: decode each image_base64 to its own
 local JPEG without printing base64, and view each returned page exactly once.
 For older versions only, decode the single top-level image_base64. If sampling
 is already running (202 pending) or a download is interrupted, retry the same
@@ -22,7 +22,11 @@ Read evidence_version, frame IDs, per-frame phase/selection, crop, sampling and
 warnings. V3 uses broad time coverage plus short bursts around tableware-track
 anchors, then quality and visual-diversity heuristics on the configured table
 polygon. These scores do not count dishes, detect occlusion or identify food.
-The native-resolution crops cover early/middle/late tableware activity.
+V4 preserves start/middle/tail coverage of the whole candidate independently
+of short tableware tracks, plus an optional post-window observation. Read
+coverage including missing frames and actual post-window times. Post-window
+means after the candidate interval, not verified after the real meal.
+The native-resolution crops annotate early/middle/late tableware activity.
 These phases do not establish meal start/end; the late frame may
 still show people eating. Report each observation's actual evidence time and
 do not describe an in-meal frame as the final leftovers. Metadata fallback,
@@ -70,7 +74,12 @@ read_path and append_path from the deployment configuration.
    started_at/ended_at interval, JSON observations array, overall confidence,
    actual frame_timestamps, uncertainty, analysis source, status. Convert display
    times to the configured timezone. Use unknown when the evidence is unclear.
-4. A normal verified write has status recorded. test=true never asserts a meal;
+4. A normal verified write has status recorded; this means the write was verified,
+   not that a meal or final leftovers were confirmed. In the analysis-source
+   column, store JSON including evidence_version, meal_status (confirmed,
+   not_meal or uncertain) and post_meal_status (confirmed or unconfirmed), with
+   supporting frame IDs. Final remainder stays unknown without a clearly
+   visible post-meal observation. test=true never asserts a meal;
    only explicit validation_mode=integration_test may write a synthetic-ID row,
    with status integration_test and uncertainty explaining its limitations.
    Exclude integration_test and pending from real meal summaries.
