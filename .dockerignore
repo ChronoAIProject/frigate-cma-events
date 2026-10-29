@@ -13,3 +13,5 @@
 !examples/
 !examples/dining/
 !examples/dining/pipeline.example.json
+
+!cma_context.py
