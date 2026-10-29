@@ -5,6 +5,7 @@ from pathlib import Path
 
 from aggregation import Rules
 from evidence import EvidenceOptions
+from cma_context import ContextCleanup
 from pipeline import Pipeline
 
 
@@ -38,6 +39,8 @@ class Config:
     evidence_options: EvidenceOptions = EvidenceOptions()
     frigate_direct: bool = False
     processing_enabled: bool = True
+    cma_context_config: str = ""
+    cma_context_token: str = ""
 
     @property
     def pipeline(self):
@@ -105,7 +108,11 @@ class Config:
             evidence_token=secret("WORKER_TOKEN") or secret("EVIDENCE_TOKEN"),
             evidence_service=(os.environ.get("WORKER_SERVICE") or os.environ.get("EVIDENCE_SERVICE", "")).strip(),
             evidence_options=EvidenceOptions(**evidence_options),
+            cma_context_config=os.environ.get("CMA_CONTEXT_CONFIG", ""),
+            cma_context_token=secret("CMA_CONTEXT_TOKEN"),
         )
+        if config.cma_context_config:
+            ContextCleanup(json.loads(config.cma_context_config), config.cma_context_token)
         if len(config.provider_token) < 32 or len(config.api_token) < 32:
             raise ValueError("PROVIDER_TOKEN and API_TOKEN must each contain at least 32 characters")
         if len(config.relay_token) < 32:

@@ -220,3 +220,19 @@ live zero-replica rollback app. Remove the retired deployment and database,
 revoke its exclusive keys, and update private operational records. Keep current
 worker-facing/delegation/operator routes: they are distinct credentials for one
 local application, not duplicate deployments.
+
+### Independent CMA contexts
+
+For independent candidates, configure a **profile** provider target and
+`partition.key: per_event`. An existing-agent target shares its native context
+even with that partition. Keep stable event IDs for retries and business history
+in the destination. Optional `CMA_CONTEXT_CONFIG` JSON configures local idle-agent
+cleanup with `cma_url` (HTTPS public API base), exact profile `binding_id`, its
+exclusive `workspace_id` and `grace_seconds` (300–86400; default 600). Set
+`CMA_CONTEXT_TOKEN` or its `_FILE` secret separately to an owner key restricted
+to the CMA service. Obtain IDs from actual owned resources; never configure a
+shared workspace or borrowed target. Cleanup requires workspace and current
+binding membership, checks readiness and age again before deletion, preserves
+working/approval states, and confirms the final resource status. Audit records
+remain under CMA retention. Operator health reports cleanup errors and counts.
+This is disabled by default and does not authorize the worker to manage Agents.

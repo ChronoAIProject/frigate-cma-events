@@ -422,3 +422,9 @@ day with an hour cooldown. These are deployment parameters, not food semantics.
 - Full retirement: disable the application Relay route before removing its
   Pipeline/worker/channel, then intentionally archive/remove its private state
   and grants. Other configured workflows must remain unaffected.
+
+Independent meals require a profile-managed CMA target and `per_event` partition.
+The channel template now uses these defaults. Do not attach all meals to a
+single existing Agent: gateway partitioning cannot reset that Agent's context.
+Use the optional scoped CMA cleanup described in the root guide to retire idle
+per-event runtimes; keep durable meal history in the Sheet and local callbacks.
