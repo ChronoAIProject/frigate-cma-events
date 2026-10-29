@@ -1,5 +1,6 @@
 import unittest
 from copy import deepcopy
+from urllib.parse import parse_qs, urlsplit
 from cma_context import ContextCleanup
 
 
@@ -18,7 +19,9 @@ class ContextCleanupTests(unittest.TestCase):
             if path.startswith('channel-records/'):return {'channel_id':'opaque_example', 'definition':definition}
             if path.startswith('channels/'):return {'items':[{'consumers':[{
                 'agent_id':'agt_example123','state':'completed','completed_at':'1970-01-01T00:10:00Z'}]}]}
-            if path.startswith('agents?'):return {'items':[{'id':'agt_example123','workspace_id':'wks_example123','profile':{'id':'agp_example123' if owned else 'agp_other12345'},'status':status,'updated_at':'1970-01-01T00:10:00Z'}]}
+            if path.startswith('agents?'):
+                requested = parse_qs(urlsplit(path).query)['status'][0]
+                return {'items':[] if requested != status else [{'id':'agt_example123','workspace_id':'wks_example123','profile':{'id':'agp_example123' if owned else 'agp_other12345'},'status':status,'updated_at':'1970-01-01T00:10:00Z'}]}
             if path.endswith('/channel-usage'):return {'bindings':[{'agent_profile_ids':['agp_example123'] if owned else 'another_binding'}]}
             return {'workspace':{'id':'wks_example123'},'profile':{'id':'agp_example123'},'status':'deleted' if self.deletes else ('stopped' if self.stopped else status),'updated_at':'1970-01-01T00:10:00Z'}
         obj.call = call
@@ -43,6 +46,49 @@ class ContextCleanupTests(unittest.TestCase):
         obj=self.setup_cleanup(status='stopped')
         obj.run(now=700)
         self.assertEqual(self.deletes,['agents/agt_example123'])
+
+    def test_deleted_history_is_excluded_from_inventory_queries(self):
+        obj = self.setup_cleanup()
+        original = obj.call
+        requested = []
+        def call(base, path, method='GET'):
+            if path.startswith('agents?'):
+                state = parse_qs(urlsplit(path).query).get('status', [None])[0]
+                requested.append(state)
+                if state is None:
+                    # The old unfiltered scan filled with retained tombstones.
+                    return {'items':[{'id':f'agt_deleted{i:08}', 'status':'deleted'}
+                                     for i in range(50)], 'next_cursor':'more_history'}
+            return original(base, path, method)
+        obj.call = call
+        self.assertIsNone(obj.run(now=1000)['error'])
+        self.assertEqual(requested, ['ready', 'stopped', 'failed'])
+        self.assertEqual(self.deletes, ['agents/agt_example123'])
+
+    def test_full_filtered_page_is_drained_and_reports_more_work(self):
+        obj = self.setup_cleanup()
+        stopped, deleted = set(), set()
+        def call(base, path, method='GET'):
+            if path.startswith('agents?'):
+                state = parse_qs(urlsplit(path).query)['status'][0]
+                return {'items':[] if state != 'ready' else [
+                    {'id':f'agt_example{i:08}', 'workspace_id':'wks_example123',
+                     'profile':{'id':'agp_example123'}, 'status':'ready',
+                     'updated_at':'1970-01-01T00:10:00Z'} for i in range(50)],
+                    **({'next_cursor':'another_page'} if state == 'ready' else {})}
+            aid = path.split('/')[1]
+            if method == 'POST':stopped.add(aid);return None
+            if method == 'DELETE':deleted.add(aid);return None
+            return {'workspace':{'id':'wks_example123'}, 'profile':{'id':'agp_example123'},
+                    'status':'deleted' if aid in deleted else 'stopped' if aid in stopped else 'ready',
+                    'updated_at':'1970-01-01T00:10:00Z'}
+        obj.call = call
+        status = obj.run(now=1000)
+        self.assertIsNone(status['error'])
+        self.assertTrue(status['scan_limited'])
+        self.assertEqual(len(deleted), 50)
+        self.assertEqual(status['retired'], 50)
+        self.assertEqual(status['pending'], 0)
 
     def test_response_failure_is_reported_without_credentials_or_body(self):
         obj=self.setup_cleanup()

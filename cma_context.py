@@ -42,7 +42,8 @@ class ContextCleanup:
         self.config, self.token = config, token
         self.opener = build_opener(NoRedirect)
         self.done = set()
-        self.status = {"enabled": True, "retired": 0, "pending": 0, "last_success_at": None, "error": None}
+        self.status = {"enabled": True, "retired": 0, "pending": 0, "scan_limited": False,
+                       "last_success_at": None, "error": None}
 
     def call(self, base, path, method="GET"):
         headers = {"Authorization": "Bearer " + self.token, "User-Agent": "cma-context-cleanup/1"}
@@ -69,12 +70,21 @@ class ContextCleanup:
 
     def _run(self, now):
         cfg = self.config
-        page = self.call(cfg["cma_url"], "agents?" + urlencode({"workspace": cfg["workspace_id"], "limit": 50}))
-        agents = page.get("items", [])
-        if page.get("next_cursor") or len(agents) >= 50:
-            raise ValueError("Dedicated cleanup workspace exceeds bounded scan")
+        # Deleted resources remain in CMA's inventory. Filter by actionable
+        # lifecycle states so historical tombstones cannot fill the scan forever.
+        # Each run drains at most one page per state; deletion removes entries
+        # from these filtered queues, so a backlog can progress on later ticks.
+        agents = {}
+        limited = False
+        for state in ("ready", "stopped", "failed"):
+            page = self.call(cfg["cma_url"], "agents?" + urlencode({
+                "workspace": cfg["workspace_id"], "status": state, "limit": 50}))
+            limited |= bool(page.get("next_cursor"))
+            for agent in page.get("items", [])[:50]:
+                agents[agent.get("id", "")] = agent
+        self.status["scan_limited"] = limited
         pending = 0
-        for agent in agents[:50]:
+        for agent in agents.values():
             aid = agent.get("id", "")
             if not re.fullmatch(r"agt_[a-zA-Z0-9]{8,128}", aid) or aid in self.done:
                 continue
