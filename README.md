@@ -234,4 +234,6 @@ to the CMA service. Obtain IDs from actual owned resources; never configure a
 shared workspace or borrowed target. Cleanup requires workspace and immutable profile identity, checks readiness and age again before deletion, preserves
 working/approval states, and confirms the final resource status. Audit records
 remain under CMA retention. Operator health reports cleanup errors and counts.
+Inventory scans filter out deleted history and drain up to 50 resources per idle
+state per run; `scan_limited` reports when another page remains for later runs.
 This is disabled by default and does not authorize the worker to manage Agents.
