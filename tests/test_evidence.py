@@ -164,16 +164,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(min(f["timestamp"] for f in tail), 1320)
         self.assertEqual(max(f["timestamp"] for f in tail), 1500)
         for phase in ("early", "middle", "late"):
-            frames = [f for f in samples if f["phase"] == phase]
-            expected_interval_samples = 2 if phase == "late" else 3
-            expected_burst_gaps = 3 if phase == "late" else 4
-            self.assertEqual(sum(f["sampling"] == "interval_coverage" for f in frames), expected_interval_samples)
-            burst = sorted(f["timestamp"] for f in frames if f["sampling"] == "anchor_burst")
-            if phase == "late":
-                self.assertTrue(burst)
-                self.assertTrue(all(1000 <= timestamp <= 1500 for timestamp in burst))
-            else:
-                self.assertEqual([round(b-a) for a, b in zip(burst, burst[1:])], [12] * expected_burst_gaps)
+            self.assertEqual(sum(f["candidate_phase"] == phase for f in samples), 8)
+        self.assertLess(min(f["timestamp"] for f in samples), 150)
         point = sample_frames(100, 100, [], options)
         self.assertEqual(len(point), 1)
 
@@ -218,8 +210,8 @@ class EvidenceTests(unittest.TestCase):
                 raise EvidenceUnavailable("recording_unavailable")
             return blob.getvalue()
 
-        with patch.object(client, "object_events", return_value=events), \\
-                patch.object(client, "crop_bounds", return_value=None), \\
+        with patch.object(client, "object_events", return_value=events), \
+                patch.object(client, "crop_bounds", return_value=None), \
                 patch.object(client, "get", side_effect=get):
             result = client.composite(candidate)
 
@@ -236,6 +228,30 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(result["evidence_budget"]["max_source_frames"], 24)
         self.assertEqual(result["evidence_budget"]["max_selected_frames"], 12)
         self.assertLessEqual(len(result["images"]), 3)
+
+    def test_short_or_disjoint_tracks_cannot_collapse_candidate_coverage(self):
+        options = EvidenceOptions(post_window_seconds=120)
+        for tracks in ([{"start": 100, "end": 100, "snapshot": 100, "score": 1}],
+                       [{"start": 100, "end": 101, "snapshot": 100, "score": 1},
+                        {"start": 199, "end": 200, "snapshot": 200, "score": 1}]):
+            frames = sample_frames(0, 3600, tracks, options)
+            self.assertEqual(len(frames), 24)
+            self.assertEqual(len({f["timestamp"] for f in frames}), 24)
+            records = [{**f, "quality": 1, "_signature": b"same-image"} for f in frames]
+            chosen = select_diverse_frames(records, 12, options)
+            self.assertLess(chosen[0]["timestamp"], 400)
+            self.assertEqual(chosen[-1]["timestamp"], 3720)
+            self.assertIn(3600, [f["timestamp"] for f in chosen])
+            self.assertEqual({f["candidate_phase"] for f in chosen}, {"early", "middle", "late"})
+            # The reserved tail already participates in duplicate screening.
+            self.assertEqual(len(chosen), 4)
+        self.assertEqual(len(sample_frames(100, 100, tracks[:1], EvidenceOptions())), 1)
+
+    def test_bad_boundary_quality_does_not_force_a_blurred_frame(self):
+        records = [{"phase": "late", "timestamp": t, "quality": q,
+                    "tracked_objects": 1, "_signature": b"same-image", "sampling": "tail_coverage"}
+                   for t, q in [(1, 1), (2, 0.01)]]
+        self.assertEqual([r["timestamp"] for r in select_diverse_frames(records, 12)], [1])
 
     def test_evidence_options_bound_tail_coverage_to_sample_budget(self):
         with self.assertRaises(ValueError):

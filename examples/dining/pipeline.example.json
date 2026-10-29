@@ -128,7 +128,7 @@
       "cup",
       "bottle"
     ],
-    "version": "tableware-diversity-v3",
+    "version": "candidate-coverage-v4",
     "cautions": [
       "Activity is not proof of a meal; removed food is not proof it was eaten.",
       "Early/middle/late describe tableware activity, not confirmed meal phases.",
@@ -136,6 +136,6 @@
       "A turntable moves the same dish. Match by appearance across frames, not fixed position; do not count it twice.",
       "Sampling cannot guarantee a complete turntable revolution or visibility of every dish."
     ],
-    "options": {}
+    "options": {"post_window_seconds": 120}
   }
 }

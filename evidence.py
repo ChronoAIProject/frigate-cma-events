@@ -39,6 +39,7 @@ class EvidenceOptions:
     novelty_scale: float = 0.12
     tail_coverage_frames: int = 2
     tail_coverage_seconds: float = 180
+    post_window_seconds: float = 0
 
     def __post_init__(self):
         if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
@@ -56,6 +57,8 @@ class EvidenceOptions:
             raise ValueError("Evidence requires 6..48 samples and 3..12 selected frames, not more than samples")
         if not 1 <= self.tail_coverage_frames <= self.sample_frames // 3 or not 1 <= self.tail_coverage_seconds <= 3600:
             raise ValueError("Tail coverage must fit the bounded sample budget and a 1..3600 second window")
+        if not 0 <= self.post_window_seconds <= 300:
+            raise ValueError("Post-window observation must be between 0 and 300 seconds")
         if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
             raise ValueError("Invalid evidence burst or sampling time budget")
         if any(not finite(v) or not 0 <= v <= 1 for v in (self.density_weight, self.quality_weight,
@@ -127,7 +130,7 @@ def sample_frames(start, end, events, options):
     burst_targets = [[], [], []]
     offsets = (0, -1, 1, -2, 2)
     for anchor_index, phase in enumerate(("early", "middle", "late")):
-        anchor = anchors[phase]
+        anchor = anchors.get(phase, start + duration * (anchor_index + 0.5) / 3)
         for offset_index, offset in enumerate(offsets):
             timestamp = min(end, max(start, anchor + offset * options.burst_seconds))
             candidate_index = 0 if duration <= 0 else min(
@@ -139,15 +142,16 @@ def sample_frames(start, end, events, options):
         lo, hi = start + duration * i / 3, start + duration * (i + 1) / 3
         quota = options.sample_frames // 3 + (i < options.sample_frames % 3)
         tail_count = min(options.tail_coverage_frames, quota) if candidate_phase == "late" else 0
-        tail_times = []
+        post_count = 1 if candidate_phase == "late" and options.post_window_seconds else 0
+        tail_times = ([(end + options.post_window_seconds, "post_window")] if post_count else [])
         if tail_count:
-            tail_times = [
+            tail_times += [
                 (tail_start + (end - tail_start) * (j / (tail_count - 1) if tail_count > 1 else 1.0),
                  "tail_coverage")
                 for j in range(tail_count)
             ]
-        broad_count = min(2 if candidate_phase == "late" else 3, quota - tail_count)
-        burst_count = max(0, quota - tail_count - broad_count)
+        broad_count = min(2 if candidate_phase == "late" else 3, quota - tail_count - post_count)
+        burst_count = max(0, quota - tail_count - broad_count - post_count)
         bursts = [(timestamp, "anchor_burst")
                   for _, _, timestamp in sorted(burst_targets[i])[:burst_count]]
         broad = [(lo + (hi - lo) * (j + 0.5) / broad_count, "interval_coverage")
@@ -162,7 +166,7 @@ def sample_frames(start, end, events, options):
         for timestamp, source in times:
             if len(pool) >= quota:
                 break
-            timestamp = min(end, max(start, timestamp))
+            timestamp = min(end + options.post_window_seconds if source == "post_window" else end, max(start, timestamp))
             key = round(timestamp, 3)
             if key in seen:
                 continue
@@ -204,42 +208,60 @@ def visual_distance(left, right):
 
 
 def select_diverse_frames(records, limit, options=None):
-    """Keep quality and complementary views within every activity phase."""
+    """Reserve candidate-time coverage before selecting complementary views.
+
+    Activity-relative phases remain useful annotations, but must never decide
+    the coverage quota: a short track may lie anywhere inside a long candidate.
+    Repeated images in different candidate thirds still establish observations
+    at different times. Extras are deduplicated within their candidate third.
+    """
     options = options or EvidenceOptions()
     chosen = []
-    tail_record = None
-    tail_candidates = [r for r in records if r.get("sampling") == "tail_coverage"]
-    if tail_candidates and limit:
-        tail_phase = max(tail_candidates, key=lambda r: (r["timestamp"], r["quality"]))["phase"]
-        phase_pool = [r for r in records if r["phase"] == tail_phase]
-        floor = max((r["quality"] for r in phase_pool), default=0) * options.minimum_quality_ratio
-        usable_tail = [r for r in tail_candidates if r["phase"] == tail_phase and r["quality"] >= floor]
-        if usable_tail:
-            tail_record = max(usable_tail, key=lambda r: (r["timestamp"], r["quality"]))
-            tail_record["visual_novelty"] = None
-            chosen.append(tail_record)
+    phase_of = lambda r: r.get("candidate_phase", r["phase"])
     for i, phase in enumerate(("early", "middle", "late")):
-        pool = [r for r in records if r["phase"] == phase and r is not tail_record]
+        pool = [r for r in records if phase_of(r) == phase]
         quota = limit // 3 + (i < limit % 3)
-        quota = max(0, quota - sum(r["phase"] == phase for r in chosen))
-        picked = []
+        if not pool or not quota:
+            continue
         peak = max((r["tracked_objects"] for r in pool), default=1) or 1
-        floor = max((r["quality"] for r in pool), default=0) * options.minimum_quality_ratio
+        floor = max(r["quality"] for r in pool) * options.minimum_quality_ratio
+        usable = [r for r in pool if r["quality"] >= floor]
+        # Keep actual boundary observations even when visually identical.
+        if not any("candidate_phase" in r for r in pool):
+            anchor = max(usable, key=lambda r: (options.density_weight * r["tracked_objects"] / peak
+                         + options.quality_weight * r["quality"], r["quality"], r["timestamp"]))
+        elif phase == "early":
+            anchor = min(usable, key=lambda r: (r["timestamp"], -r["quality"]))
+        elif phase == "middle":
+            center = (min(r["timestamp"] for r in pool) + max(r["timestamp"] for r in pool)) / 2
+            anchor = min(usable, key=lambda r: (abs(r["timestamp"] - center), -r["quality"]))
+        else:
+            anchor = max(usable, key=lambda r: (r["timestamp"], r["quality"]))
+        anchor["visual_novelty"] = None
+        picked = [anchor]
+        # With a post-window frame, retain a candidate-tail frame as well when
+        # the budget allows. The two times are distinct evidence, not extra dishes.
+        tails = [r for r in usable if r.get("sampling") == "tail_coverage" and r is not anchor]
+        if anchor.get("sampling") == "post_window" and tails and quota > 1:
+            tail = max(tails, key=lambda r: (r["timestamp"], r["quality"]))
+            tail["visual_novelty"] = None
+            picked.append(tail)
+        pool = [r for r in usable if all(r is not p for p in picked)]
         while pool and len(picked) < quota:
             ranked = []
             for record in pool:
-                if record["quality"] < floor:
+                novelty = min(visual_distance(record["_signature"], p["_signature"]) for p in picked)
+                if novelty < options.duplicate_threshold:
                     continue
-                novelty = min((visual_distance(record["_signature"], p["_signature"]) for p in picked), default=options.novelty_scale)
-                if picked and novelty < options.duplicate_threshold:
-                    continue
-                rank = (options.density_weight * record["tracked_objects"] / peak + options.quality_weight * record["quality"]
-                        + options.novelty_weight * min(1, novelty / options.novelty_scale), record["quality"], record["timestamp"])
+                rank = (options.density_weight * record["tracked_objects"] / peak
+                        + options.quality_weight * record["quality"]
+                        + options.novelty_weight * min(1, novelty / options.novelty_scale),
+                        record["quality"], record["timestamp"])
                 ranked.append((rank, record, novelty))
             if not ranked:
                 break
             _, best, novelty = max(ranked, key=lambda item: item[0])
-            best["visual_novelty"] = round(novelty, 4) if picked else None
+            best["visual_novelty"] = round(novelty, 4)
             picked.append(best)
             pool = [r for r in pool if r is not best]
         chosen.extend(picked)
@@ -471,6 +493,9 @@ class FrigateEvidence:
                              "tail_available_timestamps": tail_available,
                              "tail_selected_timestamps": tail_selected,
                              "tail_missing_timestamps": tail_missing,
+                             "post_window_seconds": self.options.post_window_seconds,
+                             "post_window_selected_timestamps": sorted(r["timestamp"] for r in selected if r.get("sampling") == "post_window"),
+                             "post_window_missing_timestamps": sorted(s["timestamp"] for s in selections if s.get("sampling") == "post_window" and s["timestamp"] not in {r["timestamp"] for r in records}),
                              "tail_available": bool(tail_selected) if not candidate.get("test") else None},
                 "crop_normalized": crop, "warnings": warnings,
                 "test": bool(candidate.get("test")),

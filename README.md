@@ -117,6 +117,13 @@ three JPEG pages. Two samples are reserved for the candidate tail over the final
 `evidence.options.tail_coverage_frames` and
 `evidence.options.tail_coverage_seconds`. The response reports available and
 selected timestamps, unobserved intervals, and whether tail coverage is available.
+Selection quotas follow the whole candidate interval, independently of object-track
+phases, and keep usable observations from the start, middle and tail even when
+they are visually identical. Optional `evidence.options.post_window_seconds`
+(0–300, default 0) adds one historical observation after the candidate within the
+same source/image budget. It does not prove that an activity actually finished.
+Private operator status reports pending, delivered and permanently failed CMA
+deliveries. A credential-free health summary is logged every minute.
 Static scenes can yield fewer frames. Quality and novelty are heuristics, not
 object identity or semantic recognition.
 

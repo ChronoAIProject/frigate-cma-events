@@ -149,6 +149,18 @@ class State:
             self.put_meta(engine, "policy_digest", current)
         return engine
 
+    def status(self):
+        with self.lock:
+            counts = {"pending": 0, "delivered": 0, "failed": 0}
+            for engine in self.engines.values():
+                counts["pending"] += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NULL").fetchone()[0]
+                counts["delivered"] += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NOT NULL").fetchone()[0]
+                counts["failed"] += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NULL AND last_status BETWEEN 400 AND 499 AND last_status != 429").fetchone()[0]
+            return {"mode": "observe", "model_calls": 0, "bindings": len(self.engines),
+                    "decisions": sum(e.db.execute("SELECT count(*) FROM decisions").fetchone()[0] for e in self.engines.values()),
+                    "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in self.engines.values()),
+                    "cma_deliveries": counts}
+
     def stamp_rules(self, engine):
         if self.config.legacy_rules_document is not None:
             self.put_meta(engine, "rules_digest", digest(self.config.legacy_rules_document))
@@ -506,9 +518,13 @@ def create_app(config=None):
         app.state.worker = State(cfg)
 
         async def timer():
+            next_report = 0.0
             while True:
                 await asyncio.sleep(cfg.tick_seconds)
                 await asyncio.to_thread(app.state.worker.flush)
+                if time.monotonic() >= next_report:
+                    print("pipeline health " + json.dumps(app.state.worker.status(), sort_keys=True), flush=True)
+                    next_report = time.monotonic() + 60
 
         task = asyncio.create_task(timer())
         try:
@@ -521,7 +537,7 @@ def create_app(config=None):
                 pass
             app.state.worker.close()
 
-    app = FastAPI(title="CMA Event Pipeline", version="0.2.1", lifespan=lifespan,
+    app = FastAPI(title="CMA Event Pipeline", version="0.2.2", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -564,7 +580,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.2.1", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.2.2", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")
@@ -720,17 +736,7 @@ def create_app(config=None):
 
     @app.get("/api/status")
     def status(request: Request):
-        state = authorize(request, operator=True)
-        with state.lock:
-            pending = 0
-            delivered = 0
-            for engine in state.engines.values():
-                pending += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NULL").fetchone()[0]
-                delivered += engine.db.execute("SELECT count(*) FROM cma_deliveries WHERE delivered_at IS NOT NULL").fetchone()[0]
-            return {"mode": "observe", "model_calls": 0, "bindings": len(state.engines),
-                    "decisions": sum(e.db.execute("SELECT count(*) FROM decisions").fetchone()[0] for e in state.engines.values()),
-                    "turns": sum(e.db.execute("SELECT count(*) FROM turns").fetchone()[0] for e in state.engines.values()),
-                    "cma_deliveries": {"pending": pending, "delivered": delivered}}
+        return authorize(request, operator=True).status()
 
     @app.get("/api/results/{candidate_id}")
     def result_read(candidate_id: str, request: Request):
