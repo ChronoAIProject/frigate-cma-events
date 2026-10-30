@@ -318,3 +318,13 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual(len(self.client.get('/api/rules/camera-b/revisions/1/decisions', headers=self.owner).json()['decisions']), 1)
         self.flush(first)
         self.assertEqual(self.client.get('/api/status', headers=self.owner).json()['runtime_errors'], {})
+
+    def test_revision_limit_does_not_prevent_stopping_an_active_rule(self):
+        doc = self.create(enabled=True)
+        self.client.app.state.monitor.MAX_REVISIONS = 2
+        self.assertEqual(self.client.patch('/api/rules/camera-one', headers={**self.owner, 'If-Match': '1'}, json={'label': 'over limit'}).status_code, 409)
+        doc = self.update(doc, enabled=False)
+        self.assertFalse(doc['enabled'])
+        response = self.client.delete('/api/rules/camera-one', headers={**self.owner, 'If-Match': '2'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['archived'])

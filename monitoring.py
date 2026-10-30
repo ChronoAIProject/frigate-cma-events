@@ -77,7 +77,7 @@ class Monitor:
                 if row is None:
                     raise Problem(404, 'rule_not_found')
                 revision = row[0]
-            if type(revision) is not int or not 1 <= revision <= self.MAX_REVISIONS:
+            if type(revision) is not int or not 1 <= revision <= 2**31 - 1:
                 raise Problem(404, 'rule_revision_not_found')
             row = self.db.execute('SELECT document FROM rule_revisions WHERE id=? AND revision=?',
                                   (identity, revision)).fetchone()
@@ -126,7 +126,8 @@ class Monitor:
                 if old['archived']:
                     raise Problem(409, 'rule_archived')
                 revision = old['revision'] + 1
-                if self.db.execute('SELECT count(*) FROM rule_revisions').fetchone()[0] >= self.MAX_REVISIONS:
+                stopping = archive or (value.get('enabled') is False and old['enabled'])
+                if self.db.execute('SELECT count(*) FROM rule_revisions').fetchone()[0] >= self.MAX_REVISIONS and not stopping:
                     raise Problem(409, 'rule_revision_limit')
                 allowed = {'pipeline', 'label', 'enabled', 'delivery_enabled'}
             else:

@@ -65,8 +65,9 @@ revision. No queue is automatically replayed when a replacement revision starts.
 Namespaced candidate identities and callback paths prevent cross-rule/revision
 collisions. The imported `default` v1 retains compatibility paths.
 
-Limits: 32 rule IDs (including archived IDs) and 256 total revisions. The API
-rejects additional revisions rather than silently deleting history. Monitor
+Limits: 32 rule IDs (including archived IDs) and 256 ordinary revisions.
+Stopping or archiving remains available at the revision limit. The API rejects
+other additional revisions rather than silently deleting history. Monitor
 storage; archive/export the full data volume deliberately. The old portable
 `/api/state/export` supports only an untouched single legacy revision and refuses
 a partial export after managed revisions exist. MongoDB snapshot deployments
