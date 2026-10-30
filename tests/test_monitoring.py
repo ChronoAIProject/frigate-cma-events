@@ -328,3 +328,31 @@ class MonitoringTests(unittest.TestCase):
         response = self.client.delete('/api/rules/camera-one', headers={**self.owner, 'If-Match': '2'})
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()['archived'])
+
+    def test_body_precondition_preserves_atomic_updates_when_proxy_strips_headers(self):
+        self.create()
+        def write(index):
+            return self.client.patch('/api/rules/camera-one', headers=self.owner,
+                                     json={'expected_revision': 1, 'label': str(index)})
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            codes = [r.status_code for r in pool.map(write, range(5))]
+        self.assertEqual(codes.count(200), 1)
+        self.assertEqual(codes.count(409), 4)
+        response = self.client.request('DELETE', '/api/rules/camera-one', headers=self.owner,
+                                       json={'expected_revision': 2})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['archived'])
+
+    def test_invalid_or_conflicting_preconditions_cannot_update_or_archive(self):
+        original = self.create()
+        for value in (True, '1', 0, -1):
+            response = self.client.patch('/api/rules/camera-one', headers=self.owner,
+                                         json={'expected_revision': value, 'enabled': True})
+            self.assertEqual(response.status_code, 400)
+        response = self.client.patch('/api/rules/camera-one', headers={**self.owner, 'If-Match': '1'},
+                                     json={'expected_revision': 2, 'enabled': True})
+        self.assertEqual(response.status_code, 400)
+        response = self.client.request('DELETE', '/api/rules/camera-one', headers=self.owner,
+                                       json={'expected_revision': 1, 'enabled': True})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.client.get('/api/rules/camera-one', headers=self.owner).json(), original)
