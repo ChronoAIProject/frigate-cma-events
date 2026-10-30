@@ -15,3 +15,7 @@
 !examples/dining/pipeline.example.json
 
 !cma_context.py
+!monitoring.py
+!management.py
+!ui/
+!ui/**
