@@ -1,14 +1,15 @@
 # Pipeline configuration
 
 A pipeline is a version-1 JSON document, at most 64 KiB. Unknown keys and
-unsupported operators/adapters are rejected. Configuration is read at startup
-from `PIPELINE_CONFIG_FILE` or `PIPELINE_CONFIG_JSON`, never from an ingestion
-request. It contains parameters and safe field paths; no eval, shell, SQL,
+unsupported operators/adapters are rejected. The startup document from
+`PIPELINE_CONFIG_FILE` or `PIPELINE_CONFIG_JSON` is imported once. Owners manage
+subsequent rules through the [page/API](monitoring.md), never through ingestion. It contains parameters and safe field paths; no eval, shell, SQL,
 remote script or arbitrary URL execution is available. Credentials use mounted
 secret variables separately.
 
-Each deployment serves one pipeline. Multiple subjects are supported within
-that pipeline; independent policies use separate deployments/state/channels.
+A deployment supports multiple versioned rules with isolated state. Multiple
+subjects are supported within each rule. Separate owners or credentials use
+separate deployments.
 
 ## Structure
 
@@ -92,8 +93,9 @@ CloudEvent (Frigate default `frigate.bridge.heartbeat`; otherwise
 `bridge.heartbeat`). It must contain actual boolean `healthy` and `resynced`.
 Receipt time controls freshness. `require_resynced` defaults true. Producers
 must assert resynchronized history only after repairing it. Connectivity alone
-is not a history guarantee. With the Frigate evidence adapter enabled, the
-service independently repairs Frigate reviews before finalization.
+is not a history guarantee. With a deployed Frigate URL, the service independently repairs reviews before
+finalization, including rules without image evidence. Shared-bridge heartbeats
+may use `subject: "*"`; camera-specific heartbeats remain supported.
 
 `observed_events` is explicitly available only for generic point events. Native
 HA bus forwarding does not prove complete history, so this mode summarizes only
@@ -163,7 +165,8 @@ Options and defaults:
 | `post_window_seconds` | 0 / 0..300; optional observation after the candidate |
 | `max_selected_gap_seconds` | 300 / 0..86400; 0 disables temporal gap filling |
 
-Each option also supports an `EVIDENCE_<UPPERCASE_NAME>` env override. Native
+The imported startup policy supports `EVIDENCE_<UPPERCASE_NAME>` env overrides.
+Managed revisions use their own `evidence.options` and explicit defaults. Native
 frames are cropped before resizing; scoring uses the configured region polygon.
 Page limit is derived from selected-frame limit (four frames per page, maximum
 three pages). Sampling, image/byte sizes and memory retention are bounded.

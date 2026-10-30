@@ -4,7 +4,8 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
-COPY cma_context.py aggregation.py config.py service.py evidence.py pipeline.py adapters.py profiles.py state_transfer.py ./
+COPY cma_context.py aggregation.py config.py service.py evidence.py pipeline.py adapters.py profiles.py state_transfer.py monitoring.py management.py ./
+COPY ui ./ui
 COPY examples/dining/pipeline.example.json ./examples/dining/pipeline.example.json
 RUN mkdir /data && chown 1000:1000 /data
 USER 1000:1000

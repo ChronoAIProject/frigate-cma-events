@@ -1,6 +1,6 @@
 [project]
 name = "frigate-cma-events"
-version = "0.2.5"
+version = "0.3.0"
 description = "Configurable event windows, bounded evidence, and durable CMA delivery"
 requires-python = ">=3.12"
 dependencies = [

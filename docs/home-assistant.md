@@ -29,8 +29,8 @@ the configured destination separately; the worker is not a replacement NyxBot.
 ## Install and configure
 
 1. Add `https://github.com/ChronoAIProject/nyx-homeassistant-node` to the HA add-on
-   store. Install the ordinary NyxID Node, Home Assistant Event Relay and CMA
-   Event Pipeline. The temporary Admin node is for management only.
+   store. Install the ordinary NyxID Node, Home Assistant Event Relay and **Video
+   Event Monitor** (existing CMA Event Pipeline add-on slug). The temporary Admin node is for management only.
 2. Copy an [example policy](../README.md#examples) outside the source checkout.
    Resolve its private source URI, selectors, conditions/windows, limits, output
    schema and evidence options. Supply the resolved JSON object serialized as
@@ -57,8 +57,9 @@ the configured destination separately; the worker is not a replacement NyxBot.
 
 The wrapper allowlists options; it always uses local SQLite `/data/state`.
 It does not accept arbitrary environment variables, scripts, shell commands,
-MongoDB settings or host paths. Configuration is loaded at startup: save and
-restart deliberately when changing options.
+MongoDB settings or host paths. Connection/secrets options load at startup and require a restart. The initial
+`pipeline_config` is imported once; manage persistent rules without restarting
+through the [HA web page or owner API](monitoring.md).
 
 HA password fields mask values in the UI; values still live in HA's private
 options and can be included in backups. The runtime drops to UID/GID 1000,
@@ -90,7 +91,9 @@ HTTPS remains the Relay default. Configure narrow MQTT/HA source routes and use
 exactly the same source URI as the policy. Include the required heartbeat route.
 A topic-only review filter can exclude heartbeats, which have no MQTT topic.
 Connection heartbeats report `resynced=false`; the Frigate adapter repairs source
-history itself before finalizing a candidate.
+history itself before finalizing a candidate, even without image evidence.
+For multiple camera rules, forward all review subjects and a global heartbeat
+with `subject: "*"`. Unmatched events do not create CMA work.
 
 During migration, preserve an existing destination ID while changing its URL:
 queued messages reference that ID. Pipeline's CMA outbox and Relay's delivery
@@ -145,7 +148,8 @@ and result POSTs; validate them through the actual worker route.
 - Verify actual source activity/trigger behavior separately. For dining, a real
   meal with visible dishes is needed to assess recognition and leftovers quality.
 - Restart the add-on and verify decisions, results and pending deliveries persist.
-  Keep `/data` on upgrade and use HA backups; images are volatile bounded caches.
+  Keep the entire `/data` on upgrade, including the rule registry and revision
+  directories, and use HA backups; images are volatile bounded caches.
 - Monitor storage: state is not automatically pruned. Raw recording retention
   and NAS capacity belong to Frigate and have separate settings.
 

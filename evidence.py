@@ -364,12 +364,12 @@ class FrigateEvidence:
 
     def reviews(self, after):
         # Fail closed if this bounded response could have truncated the window.
-        query = urlencode({"cameras": self.camera, "after": after, "limit": 1000})
+        query = urlencode({**({"cameras": self.camera} if self.camera != "*" else {}), "after": after, "limit": 1000})
         try:
             rows = json.loads(self.get("api/review?" + query))
             if not isinstance(rows, list) or len(rows) >= 1000:
                 raise ValueError()
-            if any(not isinstance(r, dict) or r.get("camera") != self.camera for r in rows):
+            if any(not isinstance(r, dict) or not isinstance(r.get("camera"), str) or (self.camera != "*" and r["camera"] != self.camera) for r in rows):
                 raise ValueError()
             return rows
         except (ValueError, TypeError) as exc:

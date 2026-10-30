@@ -42,6 +42,12 @@ class Config:
     cma_context_config: str = ""
     cma_context_token: str = ""
 
+    # Set only by the local registry / trusted HA launcher.
+    rule_id: str = ""
+    rule_revision: int = 0
+    not_before: float = 0
+    ha_ingress: bool = False
+
     @property
     def pipeline(self):
         return self.rules.pipeline(self.event_source) if isinstance(self.rules, Rules) else self.rules
@@ -87,6 +93,7 @@ class Config:
         if processing not in {"true", "false"}:
             raise ValueError("PROCESSING_ENABLED must be true or false")
         config = cls(
+            ha_ingress=os.environ.get("HA_INGRESS", "false") == "true",
             rules=rule, data_dir=Path(os.environ.get("DATA_DIR", "/data")),
             provider_token=secret("PROVIDER_TOKEN"), api_token=secret("API_TOKEN"),
             event_source=source,
