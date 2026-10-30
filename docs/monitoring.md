@@ -106,15 +106,18 @@ JSON documents use the existing [pipeline schema](pipeline.md).
 | `GET /api/rules` | Current rule documents, including archived IDs |
 | `POST /api/rules` | Create `{id, label?, pipeline, enabled?, delivery_enabled?}` |
 | `GET /api/rules/{id}` | Current document with revision `ETag` |
-| `PUT` or `PATCH /api/rules/{id}` | Change supplied fields; requires `If-Match: "<revision>"` |
-| `DELETE /api/rules/{id}` | Archive; requires `If-Match` |
+| `PUT` or `PATCH /api/rules/{id}` | Change supplied fields; requires `If-Match: "<revision>"` or JSON `expected_revision` |
+| `DELETE /api/rules/{id}` | Archive; requires `If-Match` or JSON `expected_revision` |
 | `GET /api/rules/{id}/revisions` | Immutable configuration history |
 | `GET /api/rules/{id}/revisions/{n}/status` | Revision status and current/processing flags |
 | `GET /api/rules/{id}/revisions/{n}/decisions` | Last 100 decisions and reported results |
 | `GET /api/rules/{id}/revisions/{n}/results/{candidate}` | Read a reported result |
 | `POST /api/rules/{id}/revisions/{n}/validation` | One explicit synthetic historical-image validation, active revisions only |
 
-Missing `If-Match` returns 428; a stale revision returns 409. Invalid documents
+Supply `If-Match` or an integer `expected_revision` in the update/archive JSON
+body. The latter survives proxies that omit conditional HTTP headers. If both
+are supplied, they must agree. Missing both returns 428; a stale revision returns
+409. Neither form weakens authentication or the atomic revision check. Invalid documents
 return 400 without changing the current head. New IDs match
 `[a-z][a-z0-9_-]{0,63}`; `default` is reserved for migration. Credentials, storage
 paths, arbitrary URLs and executable code cannot be set through rule fields.

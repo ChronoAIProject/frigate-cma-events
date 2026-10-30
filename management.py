@@ -16,11 +16,19 @@ def install_management(app, authorize, body, ingress):
         authorize(request, operator=True)
         return request.app.state.monitor
 
-    def revision_header(request):
-        value = request.headers.get('if-match')
-        if not value:
+    def revision_precondition(request, value):
+        header = request.headers.get('if-match')
+        expected = value.pop('expected_revision', None)
+        if expected is not None and (type(expected) is not int or expected < 1):
+            raise Problem(400, 'invalid_expected_revision')
+        if header:
+            header = header.strip('"')
+            if expected is not None and header != str(expected):
+                raise Problem(400, 'conflicting_revision_preconditions')
+            return header
+        if expected is None:
             raise Problem(428, 'revision_required')
-        return value.strip('"')
+        return str(expected)
 
     @app.get('/')
     def index():
@@ -81,14 +89,19 @@ def install_management(app, authorize, body, ingress):
     @app.patch('/api/rules/{rule_id}')
     async def update(rule_id: str, request: Request):
         mon = manager(request)
-        expected = revision_header(request)
-        doc = mon.save(await body(request), rule_id, expected)
+        value = await body(request)
+        expected = revision_precondition(request, value)
+        doc = mon.save(value, rule_id, expected)
         return JSONResponse(doc, headers={'ETag': '"%s"' % doc['revision']})
 
     @app.delete('/api/rules/{rule_id}')
-    def archive(rule_id: str, request: Request):
+    async def archive(rule_id: str, request: Request):
         mon = manager(request)
-        doc = mon.save({}, rule_id, revision_header(request), archive=True)
+        value = await body(request) if await request.body() else {}
+        expected = revision_precondition(request, value)
+        if value:
+            raise Problem(400, 'unknown_rule_fields')
+        doc = mon.save({}, rule_id, expected, archive=True)
         return doc
 
     @app.get('/api/rules/{rule_id}/revisions')

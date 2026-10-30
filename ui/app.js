@@ -6,8 +6,8 @@ function message(text, error = false) { $('message').textContent = text; $('mess
 async function api(path, method = 'GET', data, revision) {
   const headers = {'X-Monitoring-Request': '1'};
   if (token) headers.Authorization = 'Bearer ' + token;
+  if (revision !== undefined) { headers['If-Match'] = '"' + revision + '"'; data = {...(data || {}), expected_revision: revision}; }
   if (data !== undefined) headers['Content-Type'] = 'application/json';
-  if (revision !== undefined) headers['If-Match'] = '"' + revision + '"';
   const response = await fetch(new URL(path, base), {method, headers, body: data === undefined ? undefined : JSON.stringify(data)});
   const value = await response.json();
   if (!response.ok) { if (response.status === 401) $('auth').hidden = false; throw Error(value.code === 'revision_conflict' ? '规则已被其他页面修改，请刷新后重试。' : value.code || '请求失败'); }
