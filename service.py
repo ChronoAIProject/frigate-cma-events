@@ -559,7 +559,7 @@ def create_app(config=None):
                 pass
             app.state.monitor.close()
 
-    app = FastAPI(title="Video Event Monitor", version="0.3.1", lifespan=lifespan,
+    app = FastAPI(title="Video Event Monitor", version="0.3.2", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -617,7 +617,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.3.1", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.3.2", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")
@@ -864,7 +864,7 @@ def create_app(config=None):
                     "policy_digest": digest(state.pipeline.state_document()), "databases": databases}
 
     from management import install_management
-    install_management(app, authorize, body, ingress)
+    install_management(app, authorize, body, ingress, cma_event_id)
     return app
 
 
