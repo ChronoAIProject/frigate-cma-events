@@ -113,8 +113,8 @@ class MonitoringTests(unittest.TestCase):
 
     def test_source_and_subject_fanout_and_rule_identity_isolation(self):
         first = self.create(enabled=True)
-        self.create('camera-two', enabled=True)
-        response = self.ingest(first)
+        second = self.create('camera-two', enabled=True)
+        response = self.ingest(second)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(set(response.json()['rules']), {'camera-one', 'camera-two'})
         self.flush(first)
@@ -125,7 +125,7 @@ class MonitoringTests(unittest.TestCase):
             identities.append(rows[0]['candidate']['candidate_id'])
         self.assertNotEqual(*identities)
         self.assertEqual(self.client.get('/api/rules/default/revisions/1/decisions', headers=self.owner).json()['decisions'], [])
-        self.assertEqual(self.ingest(first).status_code, 200)
+        self.assertEqual(self.ingest(second).status_code, 200)
 
     def test_disabled_archived_and_new_revisions_do_not_replay_old_events(self):
         doc = self.create()
@@ -308,7 +308,7 @@ class MonitoringTests(unittest.TestCase):
     def test_one_rule_failure_does_not_stop_other_rules_or_the_next_tick(self):
         first = self.create('camera-a', enabled=True)
         second = self.create('camera-b', enabled=True)
-        self.ingest(first)
+        self.ingest(second)
         state = self.client.app.state.monitor.worker('camera-a', 1)
         with patch.object(state, 'flush', side_effect=OSError('private diagnostic')):
             self.flush(first)
