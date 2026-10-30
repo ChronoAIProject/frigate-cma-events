@@ -207,13 +207,70 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual(self.client.post('/results/example', headers=headers, json={}).status_code, 401)
 
     def test_ui_assets_ship_with_no_secrets_and_strict_csp(self):
-        for path in ('/', '/ui/app.js', '/ui/style.css'):
+        for path in ('/', '/ui/app.js', '/ui/style.css', '/ui/i18n.js'):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200)
             self.assertNotIn(self.config.api_token, response.text)
         self.assertIn("script-src 'self'", self.client.get('/').headers['content-security-policy'])
         self.assertEqual(self.client.get('/ui/monitoring.py').status_code, 404)
         self.assertNotIn('localStorage', self.client.get('/ui/app.js').text)
+
+    def test_history_distinguishes_skipped_events_from_local_only_candidates(self):
+        local = self.create('local-only', enabled=True)
+        p = policy()
+        p['activity'] = {'name': 'activity', 'minimum_events': 2, 'reason': 'custom_condition'}
+        skipped = self.create('filtered', enabled=True, pipeline=p)
+        self.ingest(local)
+        self.flush(local)
+        self.flush(skipped)
+        for doc, expected in ((local, 'local_only'), (skipped, 'skipped')):
+            row = self.client.get(f"/api/rules/{doc['id']}/revisions/1/decisions", headers=self.owner).json()['decisions'][0]
+            self.assertIsNone(row['result'])
+            self.assertEqual(row['analysis']['state'], expected)
+            if expected == 'skipped':
+                self.assertEqual(row['analysis']['reason'], 'custom_condition')
+
+    def test_history_reports_delivery_and_callback_states_without_claiming_success(self):
+        self.restart(replace(self.config, cma_event_url='https://cma.example/events', cma_hmac_key_id='test',
+                             cma_hmac_secret='x' * 32, evidence_service='test-service'))
+        p = policy()
+        p['output'] = {'result_statuses': ['processed', 'pending', 'failed', 'integration_test', 'custom_review']}
+        doc = self.create(enabled=True, delivery_enabled=True, pipeline=p)
+        self.ingest(doc)
+        state = self.client.app.state.monitor.worker(doc['id'], 1)
+        with patch.object(state, '_deliver_pending'):
+            self.flush(doc)
+        path = '/api/rules/camera-one/revisions/1/decisions'
+
+        def read():
+            response = self.client.get(path, headers=self.owner)
+            self.assertNotIn('private diagnostic', response.text)
+            return response.json()['decisions'][0]
+
+        candidate = read()['candidate']['candidate_id']
+        self.assertEqual(read()['analysis']['state'], 'queued')
+        engine = state._relay_engine()
+        for status, expected in ((401, 'delivery_failed'), (429, 'retrying'), (503, 'retrying'), (None, 'retrying')):
+            with engine.db:
+                engine.db.execute('UPDATE cma_deliveries SET attempts=1,last_status=?,last_error=?',
+                                  (status, 'private diagnostic'))
+            self.assertEqual(read()['analysis']['state'], expected)
+        with engine.db:
+            engine.db.execute('UPDATE cma_deliveries SET delivered_at=0')
+        self.assertEqual(read()['analysis']['state'], 'awaiting_result')
+        self.assertIsNone(read()['result'])
+        with engine.db:
+            engine.db.execute('UPDATE cma_deliveries SET delivered_at=NULL,last_status=NULL,attempts=0')
+        self.update(doc, enabled=False)
+        self.assertEqual(read()['analysis']['state'], 'paused')
+
+        for status, expected in (('pending', 'pending'), ('processed', 'completed'), ('failed', 'failed'),
+                                  ('integration_test', 'test_completed'), ('custom_review', 'reported')):
+            response = self.client.post('/rules/camera-one/revisions/1/results/' + candidate,
+                                        headers=self.worker_auth, json={'status': status})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(read()['analysis']['state'], expected)
+            self.assertEqual(read()['result'], {'status': status})
 
     def test_camera_inventory_never_returns_source_credentials(self):
         self.restart(replace(self.config, frigate_proxy_url='http://frigate:5000', frigate_direct=True))

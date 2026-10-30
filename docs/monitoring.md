@@ -28,6 +28,20 @@ without deleting history. Archiving is permanent; a copy can be enabled later.
 The page never stores a bearer token in browser storage. Outside HA Ingress,
 an operator may enter a token for the current page session only.
 
+Use the language selector to switch the full page between Chinese and English.
+The initial language follows the browser; switching preserves unsaved edits and
+does not change rule configuration. Rule names, IDs and policy JSON stay as entered.
+
+Each history entry distinguishes a skipped event (with its rule reason), local-only
+observation, queued/retrying/failed CMA delivery, paused delivery, and a delivered
+event awaiting a worker callback. A successful delivery is not a completed analysis.
+Worker `pending` callbacks remain unfinished; `recorded`/`processed` are completed,
+and `integration_test` is explicitly synthetic. Other configured result statuses
+are shown as reported, without assuming success. Missing callbacks alone are never
+classified as failures. The decisions API adds language-independent `analysis.state`
+with applicable `reason`, `result_status` or `http_status` metadata. The page
+translates known codes and preserves custom codes; candidate/result payloads are unchanged.
+
 A deployment currently has one CMA destination/signing credential and one
 worker/evidence credential. Each rule selects whether to use that destination
 and sets its own `output.event_type` and result contract. Configure the CMA

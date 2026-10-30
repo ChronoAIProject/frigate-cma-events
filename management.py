@@ -11,7 +11,33 @@ from monitoring import Problem
 UI = Path(__file__).parent / 'ui'
 
 
-def install_management(app, authorize, body, ingress):
+def analysis_status(candidate, result, delivery, *, processing, delivery_enabled):
+    """Describe observed state; a missing callback alone is not an analysis failure."""
+    if result:
+        status = result['status']
+        known = {'recorded': 'completed', 'processed': 'completed', 'integration_test': 'test_completed',
+                 'pending': 'pending', 'failed': 'failed', 'error': 'failed'}
+        return {'state': known.get(status, 'reported'), 'result_status': status}
+    reason = candidate['decision']
+    if reason != 'candidate':
+        return {'state': 'skipped', 'reason': reason}
+    if delivery is not None and delivery['delivered_at'] is not None:
+        return {'state': 'awaiting_result'}
+    if delivery is None and not delivery_enabled:
+        return {'state': 'local_only'}
+    if not processing:
+        return {'state': 'paused'}
+    if delivery is not None:
+        status = delivery['last_status']
+        if status is not None and 400 <= status < 500 and status != 429:
+            return {'state': 'delivery_failed', 'http_status': status}
+        if delivery['attempts']:
+            return {'state': 'retrying'}
+        return {'state': 'queued'}
+    return {'state': 'not_sent'}
+
+
+def install_management(app, authorize, body, ingress, cma_event_id):
     def manager(request):
         authorize(request, operator=True)
         return request.app.state.monitor
@@ -34,13 +60,13 @@ def install_management(app, authorize, body, ingress):
     def index():
         return FileResponse(UI / 'index.html', headers={
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'",
-            'Referrer-Policy': 'no-referrer'})
+            'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-cache'})
 
     @app.get('/ui/{asset}')
     def asset(asset: str):
-        if asset not in {'app.js', 'style.css'}:
+        if asset not in {'app.js', 'style.css', 'i18n.js'}:
             raise Problem(404, 'asset_not_found')
-        return FileResponse(UI / asset)
+        return FileResponse(UI / asset, headers={'Cache-Control': 'no-cache'})
 
     @app.get('/api/management')
     def settings(request: Request):
@@ -122,12 +148,23 @@ def install_management(app, authorize, body, ingress):
     @app.get('/api/rules/{rule_id}/revisions/{revision:int}/decisions')
     def decisions(rule_id: str, revision: int, request: Request):
         mon = manager(request)
-        state = mon.worker(rule_id, revision)
+        with mon.lock:
+            doc = mon.get(rule_id, revision)
+            current = mon.get(rule_id)
+            processing = (mon.config.processing_enabled and revision == current['revision']
+                          and doc['enabled'] and not doc['archived'])
+            state = mon.worker(rule_id, revision)
         with state.lock:
             entries = []
             for binding, engine in state.engines.items():
                 for row in engine.db.execute('SELECT id,at,payload FROM decisions ORDER BY at DESC LIMIT 100'):
                     result = engine.db.execute('SELECT payload FROM analysis_results WHERE id=?', (row['id'],)).fetchone()
-                    entries.append({'binding': binding, 'at': row['at'], 'candidate': json.loads(row['payload']),
-                                    'result': json.loads(result[0]) if result else None})
+                    candidate = json.loads(row['payload'])
+                    result = json.loads(result[0]) if result else None
+                    event_id = cma_event_id(state.config.event_source, row['id'], state.pipeline.spec['output']['event_type'])
+                    delivery = engine.db.execute(
+                        'SELECT attempts,delivered_at,last_status FROM cma_deliveries WHERE event_id=?', (event_id,)).fetchone()
+                    entries.append({'binding': binding, 'at': row['at'], 'candidate': candidate, 'result': result,
+                                    'analysis': analysis_status(candidate, result, delivery, processing=processing,
+                                                                delivery_enabled=bool(state.config.cma_event_url))})
             return {'decisions': sorted(entries, key=lambda d: d['at'], reverse=True)[:100]}
