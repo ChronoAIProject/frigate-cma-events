@@ -553,7 +553,7 @@ def create_app(config=None):
                 pass
             app.state.worker.close()
 
-    app = FastAPI(title="CMA Event Pipeline", version="0.2.4", lifespan=lifespan,
+    app = FastAPI(title="CMA Event Pipeline", version="0.2.5", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -596,7 +596,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.2.4", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.2.5", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")

@@ -40,6 +40,7 @@ class EvidenceOptions:
     tail_coverage_frames: int = 2
     tail_coverage_seconds: float = 180
     post_window_seconds: float = 0
+    max_selected_gap_seconds: float = 300.0
 
     def __post_init__(self):
         if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
@@ -59,6 +60,8 @@ class EvidenceOptions:
             raise ValueError("Tail coverage must fit the bounded sample budget and a 1..3600 second window")
         if not 0 <= self.post_window_seconds <= 300:
             raise ValueError("Post-window observation must be between 0 and 300 seconds")
+        if not 0 <= self.max_selected_gap_seconds <= 86400:
+            raise ValueError("Selected-observation gap must be between 0 and 86400 seconds")
         if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
             raise ValueError("Invalid evidence burst or sampling time budget")
         if any(not finite(v) or not 0 <= v <= 1 for v in (self.density_weight, self.quality_weight,
@@ -207,16 +210,37 @@ def visual_distance(left, right):
     return sum(abs(a - b) for a, b in zip(left, right, strict=True)) / (255 * len(left))
 
 
-def select_diverse_frames(records, limit, options=None):
+def plan_temporal_anchors(records, interval, observed, max_gap):
+    """Find a minimum-size gap-filling plan around already reserved observations.
+
+    Advancing to the furthest reachable frame minimizes additional observations
+    in each gap. Return None if the usable source frames cannot meet the target.
+    """
+    planned = []
+    for left, right in unobserved_intervals(*interval, observed):
+        cursor = left
+        while right - cursor > max_gap:
+            reachable = [r for r in records if cursor < r["timestamp"] < right
+                         and r["timestamp"] - cursor <= max_gap]
+            if not reachable:
+                return None
+            best = max(reachable, key=lambda r: (r["timestamp"], r["quality"]))
+            planned.append(best)
+            cursor = best["timestamp"]
+    return planned
+
+
+def select_diverse_frames(records, limit, options=None, *, interval=None):
     """Reserve candidate-time coverage before selecting complementary views.
 
     Activity-relative phases remain useful annotations, but must never decide
     the coverage quota: a short track may lie anywhere inside a long candidate.
-    Repeated images in different candidate thirds still establish observations
-    at different times. Extras are deduplicated within their candidate third.
+    Repeated images still establish observations at different times. Fill
+    configurable temporal gaps before deduplicating complementary visual extras.
     """
     options = options or EvidenceOptions()
     chosen = []
+    pools = []
     phase_of = lambda r: r.get("candidate_phase", r["phase"])
     for i, phase in enumerate(("early", "middle", "late")):
         pool = [r for r in records if phase_of(r) == phase]
@@ -226,6 +250,7 @@ def select_diverse_frames(records, limit, options=None):
         peak = max((r["tracked_objects"] for r in pool), default=1) or 1
         floor = max(r["quality"] for r in pool) * options.minimum_quality_ratio
         usable = [r for r in pool if r["quality"] >= floor]
+        pools.append((phase, quota, peak, usable))
         # Keep actual boundary observations even when visually identical.
         if not any("candidate_phase" in r for r in pool):
             anchor = max(usable, key=lambda r: (options.density_weight * r["tracked_objects"] / peak
@@ -234,20 +259,55 @@ def select_diverse_frames(records, limit, options=None):
             anchor = min(usable, key=lambda r: (r["timestamp"], -r["quality"]))
         elif phase == "middle":
             center = (min(r["timestamp"] for r in pool) + max(r["timestamp"] for r in pool)) / 2
-            anchor = min(usable, key=lambda r: (abs(r["timestamp"] - center), -r["quality"]))
+            anchor = min(usable, key=lambda r: (abs(r["timestamp"] - center), -r["quality"], r["timestamp"]))
         else:
             anchor = max(usable, key=lambda r: (r["timestamp"], r["quality"]))
         anchor["visual_novelty"] = None
-        picked = [anchor]
+        chosen.append(anchor)
         # With a post-window frame, retain a candidate-tail frame as well when
         # the budget allows. The two times are distinct evidence, not extra dishes.
         tails = [r for r in usable if r.get("sampling") == "tail_coverage" and r is not anchor]
         if anchor.get("sampling") == "post_window" and tails and quota > 1:
             tail = max(tails, key=lambda r: (r["timestamp"], r["quality"]))
             tail["visual_novelty"] = None
-            picked.append(tail)
+            chosen.append(tail)
+
+    if options.max_selected_gap_seconds and records:
+        available = [r for _, _, _, pool in pools for r in pool
+                     if r.get("sampling") != "post_window"]
+        if interval is None:
+            times = [r["timestamp"] for r in records if r.get("sampling") != "post_window"]
+            interval = (min(times), max(times)) if times else None
+        if interval is not None:
+            planned = plan_temporal_anchors(
+                available, interval, [r["timestamp"] for r in chosen], options.max_selected_gap_seconds)
+            if planned is not None and len(chosen) + len(planned) <= limit:
+                for record in planned:
+                    record["visual_novelty"] = None
+                chosen.extend(planned)
+        # If the full target is unattainable, improve the largest fillable gaps
+        # within the remaining budget and report the unmet target in coverage.
+        while interval is not None and len(chosen) < limit:
+            gaps = unobserved_intervals(*interval, [r["timestamp"] for r in chosen])
+            best = None
+            for left, right in sorted(gaps, key=lambda gap: gap[1] - gap[0], reverse=True):
+                if right - left <= options.max_selected_gap_seconds:
+                    break
+                candidates = [r for r in available if left < r["timestamp"] < right
+                              and all(r is not picked for picked in chosen)]
+                if candidates:
+                    best = min(candidates, key=lambda r: (
+                        abs(r["timestamp"] - (left + right) / 2), -r["quality"], r["timestamp"]))
+                    break
+            if best is None:
+                break
+            best["visual_novelty"] = None
+            chosen.append(best)
+
+    for phase, quota, peak, usable in pools:
+        picked = [r for r in chosen if phase_of(r) == phase]
         pool = [r for r in usable if all(r is not p for p in picked)]
-        while pool and len(picked) < quota:
+        while pool and len(picked) < quota and len(chosen) < limit:
             ranked = []
             for record in pool:
                 novelty = min(visual_distance(record["_signature"], p["_signature"]) for p in picked)
@@ -263,8 +323,8 @@ def select_diverse_frames(records, limit, options=None):
             _, best, novelty = max(ranked, key=lambda item: item[0])
             best["visual_novelty"] = round(novelty, 4)
             picked.append(best)
+            chosen.append(best)
             pool = [r for r in pool if r is not best]
-        chosen.extend(picked)
     return sorted(chosen, key=lambda r: r["timestamp"])
 
 
@@ -444,10 +504,18 @@ class FrigateEvidence:
         tail_available = sorted({r["timestamp"] for r in records if r.get("sampling") == "tail_coverage"})
         tail_available_keys = {round(t, 3) for t in tail_available}
         tail_missing = [t for t in tail_requested if round(t, 3) not in tail_available_keys]
-        selected = records if candidate.get("test") else select_diverse_frames(records, self.options.selected_frames, self.options)
+        selected = records if candidate.get("test") else select_diverse_frames(
+            records, self.options.selected_frames, self.options, interval=(start, end))
         tail_selected = sorted({r["timestamp"] for r in selected if r.get("sampling") == "tail_coverage"})
         if not candidate.get("test") and tail_requested and not tail_selected:
             warnings.append("No usable candidate-tail frame was selected; tail coverage is unavailable.")
+        gaps = unobserved_intervals(start, end, [r["timestamp"] for r in selected])
+        target_gap = self.options.max_selected_gap_seconds
+        temporal_enabled = bool(target_gap and not candidate.get("test"))
+        exceeded = [gap for gap in gaps if gap[1] - gap[0] > target_gap] if temporal_enabled else []
+        if exceeded:
+            warnings.append("Requested temporal coverage was not met; selected observation gaps exceed "
+                            f"{target_gap:g} seconds.")
         annotations, images = [], []
         for offset in range(0, len(selected), 4):
             page = selected[offset:offset + 4]
@@ -486,8 +554,11 @@ class FrigateEvidence:
                              "available_timestamps": sorted({r["timestamp"] for r in records}),
                              "selected_timestamps": sorted({r["timestamp"] for r in selected}),
                              "missing_timestamps": sorted(set(missing)),
-                             "unobserved_intervals": unobserved_intervals(
-                                 start, end, [r["timestamp"] for r in selected]),
+                             "unobserved_intervals": gaps,
+                             "temporal": {"requested_max_gap_seconds": target_gap,
+                                          "actual_max_gap_seconds": max((b - a for a, b in gaps), default=0),
+                                          "satisfied": not exceeded if temporal_enabled else None,
+                                          "gaps_exceeding_target": exceeded},
                              "tail_window": {"start": max(start, end - self.options.tail_coverage_seconds), "end": end},
                              "tail_requested_timestamps": tail_requested,
                              "tail_available_timestamps": tail_available,

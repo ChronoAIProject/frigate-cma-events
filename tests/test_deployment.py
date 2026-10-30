@@ -25,7 +25,8 @@ class DeploymentTests(unittest.TestCase):
                "API_TOKEN": "synthetic-api-secret", "UNRELATED_SETTING": "do-not-copy",
                "TARGET_ORG_ID": "synthetic-org", "WORKER_NAME": "DiningAnalysisWorker",
                "EVIDENCE_CROP_PADDING": "0.05", "EVIDENCE_JPEG_QUALITY": "94",
-               "EVIDENCE_SAMPLE_FRAMES": "30", "EVIDENCE_SELECTED_FRAMES": "9"}
+               "EVIDENCE_SAMPLE_FRAMES": "30", "EVIDENCE_SELECTED_FRAMES": "9",
+               "EVIDENCE_MAX_SELECTED_GAP_SECONDS": "600.5"}
         spec = render("ghcr.io/example/app:synthetic", "api", env)
         self.assertEqual(spec["target_org_id"], "synthetic-org")
         service = spec["services"]["api"]
@@ -40,13 +41,15 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(service["env"]["EVIDENCE_JPEG_QUALITY"], "94")
         self.assertEqual(service["env"]["EVIDENCE_SAMPLE_FRAMES"], "30")
         self.assertEqual(service["env"]["EVIDENCE_SELECTED_FRAMES"], "9")
+        self.assertEqual(service["env"]["EVIDENCE_MAX_SELECTED_GAP_SECONDS"], "600.5")
 
     def test_evidence_settings_load_without_changing_the_aggregation_rules(self):
         env = {**self.parameters(), "PROVIDER_TOKEN": "p" * 48, "API_TOKEN": "a" * 48,
                "EVIDENCE_CROP_PADDING": "0.05", "EVIDENCE_MAX_WIDTH": "1440",
                "EVIDENCE_MAX_HEIGHT": "810", "EVIDENCE_JPEG_QUALITY": "94",
                "EVIDENCE_SAMPLE_FRAMES": "30", "EVIDENCE_SELECTED_FRAMES": "9",
-               "EVIDENCE_BURST_SECONDS": "10", "EVIDENCE_SAMPLING_SECONDS": "30"}
+               "EVIDENCE_BURST_SECONDS": "10", "EVIDENCE_SAMPLING_SECONDS": "30",
+               "EVIDENCE_MAX_SELECTED_GAP_SECONDS": "600.5"}
         with patch.dict(os.environ, env, clear=True):
             config = Config.from_env()
         self.assertEqual(config.evidence_options.crop_padding, 0.05)
@@ -55,11 +58,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(config.evidence_options.budget(), {"max_model_turns":1, "max_images":3,
                                                            "max_source_frames":30, "max_selected_frames":9})
         self.assertEqual(config.evidence_options.burst_seconds, 10)
+        self.assertEqual(config.evidence_options.max_selected_gap_seconds, 600.5)
         self.assertEqual(config.rules.minimum_seconds, 480)
         for key, value in (("EVIDENCE_CROP_PADDING", "nan"), ("EVIDENCE_MAX_WIDTH", "10000"),
                            ("EVIDENCE_JPEG_QUALITY", "100"), ("EVIDENCE_SAMPLE_FRAMES", "4"),
                            ("EVIDENCE_SELECTED_FRAMES", "13"), ("EVIDENCE_BURST_SECONDS", "nan"),
-                           ("EVIDENCE_SAMPLING_SECONDS", "100")):
+                           ("EVIDENCE_SAMPLING_SECONDS", "100"), ("EVIDENCE_MAX_SELECTED_GAP_SECONDS", "-1")):
             with patch.dict(os.environ, {**env, key: value}, clear=True), self.assertRaises(ValueError):
                 Config.from_env()
 
