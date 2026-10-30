@@ -1,6 +1,7 @@
-# CMA Event Pipeline
+# Video Event Monitor
 
-A configurable service for turning Frigate reviews, Home Assistant events and
+A local video monitoring service with an HA management page, an owner API and
+persistent versioned rules for turning Frigate reviews, Home Assistant events and
 custom CloudEvents into bounded activity candidates for a CMA worker. The
 runtime handles normalization, filtering, per-subject windows, deduplication,
 limits, optional historical evidence, and durable signed delivery. Workers
@@ -44,8 +45,8 @@ have separate responsibilities, with one implementation of the runtime.
 
 [Cloud deployment](deploy/README.md) remains an alternative for other sites.
 Its app-spec renderer and MongoDB snapshot support are optional; they are not
-prerequisites for running on HA. Use one deployment/state set per independent
-policy/owner and one writer per state set.
+prerequisites for running on HA. Use a persistent local data volume for managed rules and one writer per state
+set. Separate owners/credentials use separate deployments.
 
 ## Configuration
 
@@ -101,10 +102,11 @@ agent-card display name `WORKER_NAME`. See [deployment](deploy/README.md).
   with backoff; retain permanent failures for inspection. CMA admission is not
   proof of worker completion or an external write.
 
-One deployment runs one pipeline, one process and one replica. A wildcard
-subject handles many entities with separate windows/limits. Independent
-policies or owners use separate app/state/channel deployments. Configuration
-loads at startup; HTTP callers cannot install code or modify policy.
+One deployment runs multiple versioned rules in one process/replica. Manage
+them through the [HA page or owner API](docs/monitoring.md); the startup policy
+is imported once as `default`. A wildcard subject handles many entities with
+separate windows/limits. Only an owner can edit policy; no caller can install
+code. CMA destination and credentials remain deployment parameters.
 
 ## Historical evidence
 
@@ -147,13 +149,15 @@ Cached retrieval does not resample.
 
 Labels, crop zone, cautions and `EvidenceOptions` weights/thresholds are set in
 `evidence` configuration. `EVIDENCE_*` deployment overrides remain supported;
-see the [guide](docs/pipeline.md). Evidence settings can change without resetting
-aggregation. Integration validation uses one source frame and one image.
+see the [guide](docs/pipeline.md). Evidence settings do not change the aggregation digest; a managed edit still
+creates an isolated revision. Integration validation uses one source frame and one image.
 
 ## API
 
 Public: `GET /healthz` and `GET /.well-known/agent-card.json`. Other routes use
-bearer authentication; installation details are never in public health output.
+bearer authentication (owner management also supports trusted HA Ingress);
+installation details are never in public health output. See the
+[management API and revision guide](docs/monitoring.md) for rule CRUD/history.
 
 | Route | Credential | Purpose |
 | --- | --- | --- |
@@ -192,8 +196,9 @@ uv run uvicorn service:app --host 0.0.0.0 --port 8080 --no-access-log
 The Docker image runs as an unprivileged user. Mount writable persistent state
 or use the platform MongoDB add-on (`PERSISTENCE_BACKEND=mongodb` in the renderer)
 for bounded SQLite snapshots. State is not automatically pruned; monitor and
-archive it. A changed aggregation policy requires separate state; startup refuses
-to mix policy histories. The [migration procedure](docs/pipeline.md#existing-dining-installations)
+archive it. Managed edits create isolated revision state; legacy startup refuses to mix
+incompatible histories. Back up the complete registry and revision directories.
+The legacy portable export refuses partial multi-rule exports. The [migration procedure](docs/pipeline.md#existing-dining-installations)
 allows an equivalent legacy dining installation to adopt explicit configuration
 while preserving IDs, decisions, receipts, outbox and results.
 

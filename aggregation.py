@@ -19,7 +19,8 @@ from profiles import Rules  # Compatibility import for existing callers.
 
 
 class Aggregator:
-    def __init__(self, database, rules):
+    def __init__(self, database, rules, *, namespace="", not_before=0):
+        self.namespace, self.not_before = namespace, not_before
         self.rules = rules
         self.policy = rules.pipeline() if isinstance(rules, Rules) else rules
         self.adapter = Adapter(self.policy)
@@ -55,6 +56,8 @@ class Aggregator:
             raise ValueError("Invalid timestamp")
         if start > received_at + 60 or (end is not None and (end < start or end > received_at + 60)):
             raise ValueError("Invalid event time range")
+        if start < self.not_before:
+            return "before_revision"
         if phase not in {"new", "update", "end"} or (phase == "end") != (end is not None):
             raise ValueError("An end event needs an explicit end_time")
         identity, data = normalized["id"], normalized["data"]
@@ -144,7 +147,7 @@ class Aggregator:
             reason = "daily_limit"
         ids = [r["id"] for r in group["rows"]]
         prefix = cfg["output"]["id_prefix"] or cfg["name"] + "/" + cfg["source"]["source"] + "/" + group["subject"]
-        identity = str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + "/".join(sorted(ids))))
+        identity = str(uuid.uuid5(uuid.NAMESPACE_URL, (self.namespace + "/" if self.namespace else "") + prefix + "/" + "/".join(sorted(ids))))
         sample_count = min(len(ids), cfg["output"]["metadata_records"])
         samples, exported_bytes = [], 0
         indexes = sorted({round(i * (len(ids)-1) / max(1, sample_count-1)) for i in range(sample_count)})

@@ -212,7 +212,7 @@ class Pipeline:
         if not isinstance(out["id_prefix"], str) or len(out["id_prefix"]) > 256 or (out["id_prefix"] and s["subject"] == "*"):
             raise ValueError("A compatibility ID prefix requires a fixed subject")
         out.setdefault("aliases", {})
-        reserved = {"schema", "candidate_id", "subject", "decision", "event_ids", "started_at", "ended_at", "activity_seconds", "event_count", "conditions", "images", "evidence_budget", "cautions", "test", "validation_mode", "status", "accepted", "result", "records", "metadata_truncated"}
+        reserved = {"schema", "candidate_id", "subject", "decision", "event_ids", "started_at", "ended_at", "activity_seconds", "event_count", "conditions", "images", "evidence_budget", "cautions", "test", "validation_mode", "status", "accepted", "result", "records", "metadata_truncated", "monitoring_rule", "evidence", "result_callback"}
         if not isinstance(out["aliases"], dict) or len(out["aliases"]) > 16:
             raise ValueError("Invalid output aliases")
         for alias, field in out["aliases"].items():

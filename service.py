@@ -15,6 +15,7 @@ import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from monitoring import Monitor, Problem
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -42,11 +43,6 @@ def cma_signature(secret, webhook_id, webhook_timestamp, raw_body):
     signed = webhook_id + "." + webhook_timestamp + "." + raw_body
     value = hmac.new(secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).digest()
     return "v1," + base64.b64encode(value).decode("ascii")
-
-
-class Problem(Exception):
-    def __init__(self, status, code):
-        self.status, self.code = status, code
 
 
 class SnapshotStore:
@@ -90,8 +86,9 @@ class State:
                                         version=media["version"], cautions=media["cautions"],
                                         aliases=self.pipeline.spec["output"]["aliases"], allow_http=config.frigate_direct)
                          if config.frigate_proxy_url and media["adapter"] == "frigate" else None)
-        self.evidence_cache = {}
-        self.evidence_busy = False
+        self.source_client = (self.evidence or FrigateEvidence(
+            config.frigate_proxy_url, config.frigate_api_key, self.pipeline.subject, allow_http=config.frigate_direct)
+            if config.frigate_proxy_url and self.pipeline.spec["source"]["adapter"] == "frigate_reviews" else None)
         self.snapshots = None
         if config.mongo_uri:
             try:
@@ -114,6 +111,8 @@ class State:
         except PermissionError:
             pass
         for path in config.data_dir.glob("*.sqlite3"):
+            if path.name == "monitoring.sqlite3":
+                continue
             engine = self._open(path)
             row = engine.db.execute("SELECT value FROM meta WHERE key='binding_id'").fetchone()
             if row:
@@ -122,7 +121,9 @@ class State:
                 engine.close()
 
     def _open(self, path):
-        engine = Aggregator(path, self.pipeline)
+        engine = Aggregator(path, self.pipeline,
+                            namespace=(self.config.rule_id + "/" + str(self.config.rule_revision)) if self.config.rule_id else "",
+                            not_before=self.config.not_before)
         path.chmod(0o600)
         engine.db.executescript("""
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -316,7 +317,7 @@ class State:
         cfg = self.pipeline
         try:
             after = now - cfg.maximum_seconds - cfg.merge_seconds - cfg.delivery_grace_seconds
-            rows = self.evidence.reviews(after)
+            rows = (self.evidence or self.source_client).reviews(after)
             from aggregation import wrap_review
             with engine.db:
                 for row in rows:
@@ -325,10 +326,10 @@ class State:
                     if old and old["start"] == row["start_time"] and old["end"] == row.get("end_time") and json.loads(old["data"]) == normalized:
                         continue
                     phase = "end" if row.get("end_time") is not None else "update"
-                    engine.ingest(wrap_review({"type": phase, "before": row, "after": row}, self.config.event_source), now)
+                    self._ingest(engine, wrap_review({"type": phase, "before": row, "after": row}, self.config.event_source), now)
             self.persist(engine)
             return True
-        except (EvidenceUnavailable, ValueError, KeyError, TypeError):
+        except (EvidenceUnavailable, ValueError, KeyError, TypeError, Problem):
             return False
 
     def admit(self, body, key):
@@ -381,6 +382,10 @@ class State:
         event_type = self.pipeline.spec["output"]["event_type"]
         if not isinstance(candidate_id, str) or not isinstance(subject, str):
             return
+        prefix = ("rules/" + self.config.rule_id + "/revisions/" + str(self.config.rule_revision) + "/"
+                  if self.config.rule_id else "")
+        if self.config.rule_id:
+            payload = {**payload, "monitoring_rule": {"id": self.config.rule_id, "revision": self.config.rule_revision}}
         event = {
             "specversion": "1.0",
             "id": cma_event_id(self.config.event_source, candidate_id, event_type),
@@ -393,12 +398,12 @@ class State:
         if self.config.evidence_service and self.pipeline.spec["evidence"]["adapter"] != "none":
             event["data"] = {**payload, "evidence_budget": (payload["evidence_budget"] if payload.get("test")
                             else self.config.evidence_options.budget()), "evidence": {
-                "service": self.config.evidence_service, "path": "evidence/" + candidate_id,
-                "result_path": "results/" + candidate_id,
+                "service": self.config.evidence_service, "path": prefix + "evidence/" + candidate_id,
+                "result_path": prefix + "results/" + candidate_id,
                 "instructions": "Fetch this bounded evidence JSON through NyxID into a private file; decode images[].image_base64 locally and view each page once within evidence_budget. Never print base64. A 202 pending response or interrupted download may be retried at most 6 times after 5 seconds; cached retrieval does not resample. Frames have IDs and actual timestamps. Read all cautions; quality/novelty/track counts are heuristics, not semantic conclusions. Never call raw source media or live images. Follow the configured downstream workflow, deduplicate by candidate_id, independently verify side effects and then POST the configured result fields to result_path. integration_test is synthetic; unavailable evidence means pending."}}
         if self.config.evidence_service and self.config.evidence_token:
             event["data"] = {**event["data"], "result_callback": {"service": self.config.evidence_service,
-                "path": "results/" + candidate_id, "statuses": self.pipeline.spec["output"]["result_statuses"],
+                "path": prefix + "results/" + candidate_id, "statuses": self.pipeline.spec["output"]["result_statuses"],
                 "fields": self.pipeline.spec["output"]["result_fields"]}}
         with engine.db:
             engine.db.execute(
@@ -493,7 +498,7 @@ class State:
                 healthy = (health_policy["mode"] == "observed_events" or (heartbeat.get("healthy")
                            and (heartbeat.get("resynced") or not health_policy["require_resynced"])
                            and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds))
-                if binding == "__relay_ingest__" and self.evidence:
+                if binding == "__relay_ingest__" and (self.evidence or self.source_client):
                     connected = heartbeat.get("healthy") and 0 <= now - heartbeat.get("at", 0) <= self.config.heartbeat_seconds
                     # A successful REST check replaces the relay's unverified resynced assertion.
                     healthy = bool(connected and self.reconcile(engine, now))
@@ -519,15 +524,16 @@ def create_app(config=None):
     @asynccontextmanager
     async def lifespan(app):
         cfg = config or Config.from_env()
-        app.state.worker = State(cfg)
+        app.state.monitor = Monitor(cfg, State)
+        app.state.worker = app.state.monitor.legacy
 
         async def timer():
             next_report = 0.0
             while True:
                 await asyncio.sleep(cfg.tick_seconds)
-                await asyncio.to_thread(app.state.worker.flush)
+                await asyncio.to_thread(app.state.monitor.flush)
                 if time.monotonic() >= next_report:
-                    print("pipeline health " + json.dumps(app.state.worker.status(), sort_keys=True), flush=True)
+                    print("pipeline health " + json.dumps(app.state.monitor.status(), sort_keys=True), flush=True)
                     next_report = time.monotonic() + 60
 
         async def cleanup():
@@ -551,9 +557,9 @@ def create_app(config=None):
                 await task
             except asyncio.CancelledError:
                 pass
-            app.state.worker.close()
+            app.state.monitor.close()
 
-    app = FastAPI(title="CMA Event Pipeline", version="0.2.5", lifespan=lifespan,
+    app = FastAPI(title="Video Event Monitor", version="0.3.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -577,13 +583,28 @@ def create_app(config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
+    def selected_state(request):
+        if "rule_id" in request.path_params and "revision" in request.path_params:
+            return request.app.state.monitor.worker(request.path_params["rule_id"], int(request.path_params["revision"]))
+        return request.app.state.worker
+
+    def ingress(request):
+        return (request.app.state.monitor.config.ha_ingress and request.client is not None
+                and request.client.host == "172.30.32.2"
+                and request.headers.get("x-ingress-path", "").startswith("/api/hassio_ingress/")
+                and bool(request.headers.get("x-remote-user-id")))
+
     def authorize(request, operator=False, relay=False):
         state = request.app.state.worker
+        if operator and ingress(request):
+            if request.method not in {"GET", "HEAD"} and request.headers.get("x-monitoring-request") != "1":
+                raise Problem(403, "management_request_header_required")
+            return selected_state(request)
         token = (state.config.api_token if operator else (state.config.relay_token or state.config.api_token) if relay
                  else state.config.provider_token)
         if not hmac.compare_digest(request.headers.get("authorization", "").encode(), ("Bearer " + token).encode()):
             raise Problem(401, "not_authenticated")
-        return state
+        return selected_state(request)
 
     async def body(request):
         try:
@@ -596,16 +617,18 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.2.5", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.3.0", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")
     async def ingest(request: Request):
         state = authorize(request, relay=True)
         value = await body(request)
-        with state.lock:
-            result = state.ingest_relay(value)
-        return {"accepted": result, "event_id": value.get("id")}
+        result, outcomes = request.app.state.monitor.ingest_relay(value)
+        response = {"accepted": result, "event_id": value.get("id")}
+        if outcomes is not None:
+            response["rules"] = outcomes
+        return response
 
     def evidence_authorize(request):
         state = request.app.state.worker
@@ -614,37 +637,41 @@ def create_app(config=None):
         if not hmac.compare_digest(request.headers.get("authorization", "").encode(),
                                    ("Bearer " + state.config.evidence_token).encode()):
             raise Problem(401, "not_authenticated")
-        return state
+        return selected_state(request)
 
+    @app.get("/rules/{rule_id}/revisions/{revision:int}/evidence/{candidate_id}")
     @app.get("/evidence/{candidate_id}")
     def evidence(candidate_id: str, request: Request):
         state = evidence_authorize(request)
         if state.evidence is None:
             raise Problem(503, "evidence_disabled")
+        monitor = request.app.state.monitor
+        key = (state.config.rule_id or "default", state.config.rule_revision or 1, candidate_id)
         with state.lock:
             candidate = state.candidate(candidate_id)
-            # A fixed bounded evidence pack per candidate; no source media on disk.
-            if candidate_id in state.evidence_cache:
-                return state.evidence_cache[candidate_id]
-            if state.evidence_busy:
+        # One extraction and four cached packs across ALL rules/revisions.
+        with monitor.media_lock:
+            if key in monitor.media_cache:
+                return monitor.media_cache[key]
+            if monitor.media_busy:
                 return JSONResponse(state.pipeline.aliases({"status": "pending", "candidate_id": candidate_id}), status_code=202,
                                     headers={"Retry-After": "5"})
-            state.evidence_busy = True
-        # Historical extraction must not hold the lock used by live ingestion.
+            monitor.media_busy = True
         try:
             try:
                 result = state.evidence.composite(candidate)
             except EvidenceUnavailable as exc:
                 raise Problem(424, str(exc)) from None
-            with state.lock:
-                while len(state.evidence_cache) >= 4:
-                    state.evidence_cache.pop(next(iter(state.evidence_cache)))
-                state.evidence_cache[candidate_id] = result
+            with monitor.media_lock:
+                while len(monitor.media_cache) >= 4:
+                    monitor.media_cache.pop(next(iter(monitor.media_cache)))
+                monitor.media_cache[key] = result
             return result
         finally:
-            with state.lock:
-                state.evidence_busy = False
+            with monitor.media_lock:
+                monitor.media_busy = False
 
+    @app.post("/rules/{rule_id}/revisions/{revision:int}/results/{candidate_id}")
     @app.post("/results/{candidate_id}")
     async def analysis_result(candidate_id: str, request: Request):
         state = evidence_authorize(request)
@@ -666,11 +693,17 @@ def create_app(config=None):
             state.persist(engine)
         return state.pipeline.aliases({"candidate_id": candidate_id, "accepted": True})
 
+    @app.post("/api/rules/{rule_id}/revisions/{revision:int}/validation")
     @app.post("/api/validation")
     def validation(request: Request):
         state = authorize(request, operator=True)
         if not state.config.processing_enabled:
             raise Problem(503, "processing_paused")
+        mon = request.app.state.monitor
+        identity, revision = (state.config.rule_id or "default"), (state.config.rule_revision or 1)
+        doc = mon.get(identity)
+        if doc['revision'] != revision or not doc['enabled'] or doc['archived']:
+            raise Problem(409, "rule_revision_inactive")
         if not state.evidence:
             raise Problem(503, "evidence_disabled")
         with state.lock:
@@ -732,6 +765,9 @@ def create_app(config=None):
     async def responses(request: Request):
         state = authorize(request)
         value = await body(request)
+        default = request.app.state.monitor.get("default")
+        if default['revision'] != 1 or not default['enabled'] or default['archived']:
+            raise Problem(409, "legacy_provider_rule_inactive")
         with state.lock:
             result = state.admit(value, request.headers.get("idempotency-key"))
         created = {"type": "response.created", "response": {"id": result["id"], "status": "in_progress"}}
@@ -752,8 +788,10 @@ def create_app(config=None):
 
     @app.get("/api/status")
     def status(request: Request):
-        return authorize(request, operator=True).status()
+        authorize(request, operator=True)
+        return request.app.state.monitor.status()
 
+    @app.get("/api/rules/{rule_id}/revisions/{revision:int}/results/{candidate_id}")
     @app.get("/api/results/{candidate_id}")
     def result_read(candidate_id: str, request: Request):
         state = authorize(request, operator=True)
@@ -810,6 +848,8 @@ def create_app(config=None):
         state = authorize(request, operator=True)
         if state.config.processing_enabled:
             raise Problem(409, "pause_processing_before_export")
+        if request.app.state.monitor.db.execute('SELECT count(*) FROM rule_revisions').fetchone()[0] > 1:
+            raise Problem(409, "managed_state_requires_full_data_backup")
         with state.lock:
             databases = []
             for binding, engine in sorted(state.engines.items()):
@@ -823,6 +863,8 @@ def create_app(config=None):
             return {"schema": "event-pipeline-state.v1", "source": state.config.event_source,
                     "policy_digest": digest(state.pipeline.state_document()), "databases": databases}
 
+    from management import install_management
+    install_management(app, authorize, body, ingress)
     return app
 
 
