@@ -122,9 +122,19 @@ phases, and keep usable observations from the start, middle and tail even when
 they are visually identical. Optional `evidence.options.post_window_seconds`
 (0–300, default 0) adds one historical observation after the candidate within the
 same source/image budget. It does not prove that an activity actually finished.
+`evidence.options.max_selected_gap_seconds` (default 300, 0 disables) reserves
+additional temporal observations before visual deduplication. The selector first
+plans the fewest usable extra frames needed around the reserved observations.
+If the target is unattainable, it improves the largest fillable gaps within the
+same selected-frame limit. `coverage.temporal` reports the requested and actual maximum
+gap, unmet intervals and whether the target was satisfied. Missing recordings,
+quality filtering or frame limits can prevent the target; the response warns
+instead of exceeding budgets or forcing poor-quality frames. Post-window frames
+do not substitute for observations inside the candidate interval.
 Private operator status reports pending, delivered and permanently failed CMA
 deliveries. A credential-free health summary is logged every minute.
-Static scenes can yield fewer frames. Quality and novelty are heuristics, not
+Static scenes can yield fewer frames once the temporal target is met, or when
+that target is disabled. Quality and novelty are heuristics, not
 object identity or semantic recognition.
 
 The worker saves `images[]` locally and views each page once within the supplied

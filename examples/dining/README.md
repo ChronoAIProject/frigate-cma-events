@@ -89,6 +89,12 @@ and `EVIDENCE_SAMPLING_SECONDS` bound sampling, selected views, burst spacing
 and processing time. Inspect the selected historical pages and their frame IDs,
 phase/sampling/warning metadata when checking
 recognition quality; a late activity frame is not necessarily a post-meal frame.
+`EVIDENCE_MAX_SELECTED_GAP_SECONDS` (default 300, 0 disables) reserves temporal
+observations before deduplication so small dish changes are not the only reason
+to retain a frame. It shares the existing image budget. Check
+`coverage.temporal.satisfied`, actual gaps and warnings: unavailable recordings,
+quality filtering or the budget can prevent the target. No temporal target
+establishes whether an observed frame shows final leftovers.
 
 ## 2. Prepare private configuration
 

@@ -48,6 +48,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(first.json(), again.json())
         self.assertEqual(len(first.json()["frame_timestamps"]), 1)
         self.assertEqual(len(first.json()["images"]), 1)
+        self.assertIsNone(first.json()["coverage"]["temporal"]["satisfied"])
         self.assertEqual(first.json()["evidence_budget"]["max_source_frames"], 1)
         self.assertEqual(get.call_count, 1)
         self.assertIn("/recordings/", get.call_args.args[0])
@@ -193,7 +194,7 @@ class EvidenceTests(unittest.TestCase):
              "quality": 1.0, "_signature": b"same-image"}
             for timestamp in (2400, 3000, 3599)
         ]
-        chosen = select_diverse_frames(late_duplicates, 3)
+        chosen = select_diverse_frames(late_duplicates, 3, EvidenceOptions(max_selected_gap_seconds=0))
         self.assertEqual([frame["timestamp"] for frame in chosen], [3599])
 
     def test_candidate_tail_unavailability_is_reported_without_exceeding_budgets(self):
@@ -230,7 +231,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertLessEqual(len(result["images"]), 3)
 
     def test_short_or_disjoint_tracks_cannot_collapse_candidate_coverage(self):
-        options = EvidenceOptions(post_window_seconds=120)
+        options = EvidenceOptions(post_window_seconds=120, max_selected_gap_seconds=0)
         for tracks in ([{"start": 100, "end": 100, "snapshot": 100, "score": 1}],
                        [{"start": 100, "end": 101, "snapshot": 100, "score": 1},
                         {"start": 199, "end": 200, "snapshot": 200, "score": 1}]):
@@ -256,6 +257,125 @@ class EvidenceTests(unittest.TestCase):
     def test_evidence_options_bound_tail_coverage_to_sample_budget(self):
         with self.assertRaises(ValueError):
             EvidenceOptions(sample_frames=6, tail_coverage_frames=3)
+
+    def test_small_local_changes_keep_temporal_anchors_before_visual_deduplication(self):
+        records = []
+        for i in range(24):
+            phase = ("early", "middle", "late")[i // 8]
+            signature = bytearray([100] * 4608)
+            for j in range(30):
+                signature[(i * 31 + j) % 4608] = 220
+            records.append({"timestamp": i * 120, "phase": phase, "candidate_phase": phase,
+                            "sampling": "interval_coverage", "tracked_objects": 1,
+                            "quality": 0.95, "_signature": bytes(signature)})
+        legacy = select_diverse_frames(records, 12, EvidenceOptions(max_selected_gap_seconds=0))
+        self.assertEqual([r["timestamp"] for r in legacy], [0, 1320, 2760])
+        chosen = select_diverse_frames(records, 12, EvidenceOptions(max_selected_gap_seconds=360))
+        self.assertGreater(len(chosen), len(legacy))
+        self.assertLessEqual(len(chosen), 12)
+        self.assertEqual(chosen[0]["timestamp"], 0)
+        self.assertEqual(chosen[-1]["timestamp"], 2760)
+        self.assertLessEqual(max(b["timestamp"] - a["timestamp"] for a, b in zip(chosen, chosen[1:])), 360)
+        self.assertEqual([r["timestamp"] for r in chosen], [r["timestamp"] for r in
+                         select_diverse_frames(list(reversed(records)), 12,
+                                               EvidenceOptions(max_selected_gap_seconds=360))])
+
+    def test_temporal_selection_keeps_tail_and_post_window_within_existing_limits(self):
+        options = EvidenceOptions(post_window_seconds=120, max_selected_gap_seconds=360)
+        samples = sample_frames(0, 1800, [], options)
+        records = [{**frame, "quality": 1, "_signature": b"static-image"} for frame in samples]
+        chosen = select_diverse_frames(records, 12, options, interval=(0, 1800))
+        times = [r["timestamp"] for r in chosen]
+        self.assertIn(1800, times)
+        self.assertIn(1920, times)
+        self.assertLessEqual(len(chosen), 12)
+        points = [0, *(t for t in times if 0 < t < 1800), 1800]
+        self.assertLessEqual(max(b - a for a, b in zip(points, points[1:])), 360)
+        self.assertEqual(options.budget(), {"max_model_turns": 1, "max_images": 3,
+                                            "max_source_frames": 24, "max_selected_frames": 12})
+
+    def test_achievable_temporal_target_is_not_lost_to_inefficient_gap_splitting(self):
+        records = []
+        for timestamp in range(0, 3001, 100):
+            phase = "early" if timestamp <= 1000 else "middle" if timestamp <= 2000 else "late"
+            records.append({"timestamp": timestamp, "phase": phase, "candidate_phase": phase,
+                            "sampling": "interval_coverage", "tracked_objects": 1,
+                            "quality": 1, "_signature": b"static-image"})
+        options = EvidenceOptions(sample_frames=36, max_selected_gap_seconds=300)
+        chosen = select_diverse_frames(records, 12, options, interval=(0, 3000))
+        times = [r["timestamp"] for r in chosen]
+        self.assertIn(1500, times)
+        self.assertEqual(times[0], 0)
+        self.assertEqual(times[-1], 3000)
+        self.assertLessEqual(len(chosen), 12)
+        self.assertLessEqual(max(b - a for a, b in zip(times, times[1:])), 300)
+
+    def test_unachievable_temporal_coverage_reports_actual_gaps_without_forcing_bad_frames(self):
+        blob = BytesIO()
+        Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        candidate = {"candidate_id": "synthetic-coverage", "subject": "test-camera",
+                     "started_at": 0, "ended_at": 1200}
+        for cause in ("missing", "quality", "budget"):
+            with self.subTest(cause=cause):
+                options = EvidenceOptions(max_selected_gap_seconds=200,
+                                          selected_frames=3 if cause == "budget" else 12)
+                client = FrigateEvidence("https://proxy.example/service", "key", "test-camera", options=options)
+                last_timestamp = [0]
+
+                def get(path, **kwargs):
+                    timestamp = float(path.split("/recordings/")[1].split("/")[0])
+                    last_timestamp[0] = timestamp
+                    if cause == "missing" and 450 <= timestamp <= 750:
+                        raise EvidenceUnavailable("recording_unavailable")
+                    return blob.getvalue()
+
+                def metrics(*args):
+                    low = cause == "quality" and 500 <= last_timestamp[0] <= 750
+                    return {"quality": 0.01 if low else 1.0, "_signature": b"static-image"}
+
+                with patch.object(client, "object_events", return_value=[]), \
+                        patch.object(client, "crop_bounds", return_value=None), \
+                        patch.object(client, "get", side_effect=get) as fetch, \
+                        patch("evidence.visual_metrics", side_effect=metrics):
+                    result = client.composite(candidate)
+                coverage = result["coverage"]["temporal"]
+                self.assertFalse(coverage["satisfied"])
+                self.assertEqual(coverage["requested_max_gap_seconds"], 200)
+                self.assertGreater(coverage["actual_max_gap_seconds"], 200)
+                self.assertTrue(coverage["gaps_exceeding_target"])
+                self.assertTrue(all(b - a > 200 for a, b in coverage["gaps_exceeding_target"]))
+                self.assertTrue(any("Requested temporal coverage was not met" in w for w in result["warnings"]))
+                self.assertEqual(fetch.call_count, 24)
+                self.assertLessEqual(len(result["frames"]), options.selected_frames)
+                self.assertLessEqual(len(result["images"]), options.budget()["max_images"])
+                self.assertTrue(all(r["quality"] == 1 for r in result["frames"]))
+
+    def test_temporal_coverage_succeeds_for_static_frames_and_can_be_disabled(self):
+        blob = BytesIO()
+        Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        candidate = {"candidate_id": "synthetic-static", "subject": "test-camera",
+                     "started_at": 0, "ended_at": 1200}
+        for gap in (300, 0):
+            client = FrigateEvidence("https://proxy.example/service", "key", "test-camera",
+                                     options=EvidenceOptions(max_selected_gap_seconds=gap))
+            with patch.object(client, "object_events", return_value=[]), \
+                    patch.object(client, "crop_bounds", return_value=None), \
+                    patch.object(client, "get", return_value=blob.getvalue()):
+                result = client.composite(candidate)
+            temporal = result["coverage"]["temporal"]
+            if gap:
+                self.assertTrue(temporal["satisfied"])
+                self.assertLessEqual(temporal["actual_max_gap_seconds"], gap)
+            else:
+                self.assertIsNone(temporal["satisfied"])
+                self.assertEqual(result["sampling"]["selected"], 3)
+            self.assertFalse(temporal["gaps_exceeding_target"])
+            self.assertFalse(any("Requested temporal coverage was not met" in w for w in result["warnings"]))
+
+    def test_temporal_gap_option_rejects_invalid_values(self):
+        for value in (-1, 86401, float("nan"), float("inf"), True, "300"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                EvidenceOptions(max_selected_gap_seconds=value)
 
     def test_evidence_pack_limits_pages_and_gives_frames_stable_ids(self):
         client = FrigateEvidence("https://proxy.example/service", "key", "test-camera")

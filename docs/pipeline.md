@@ -158,12 +158,31 @@ Options and defaults:
 | `duplicate_threshold` | 0.018 / 0..1 within-phase visual distance |
 | `minimum_quality_ratio` | 0.6 / 0..1 relative to phase's best quality |
 | `novelty_scale` | 0.12 / greater than 0, at most 1 |
+| `tail_coverage_frames` | 2 / 1..one third of source samples |
+| `tail_coverage_seconds` | 180 / 1..3600 |
+| `post_window_seconds` | 0 / 0..300; optional observation after the candidate |
+| `max_selected_gap_seconds` | 300 / 0..86400; 0 disables temporal gap filling |
 
 Each option also supports an `EVIDENCE_<UPPERCASE_NAME>` env override. Native
 frames are cropped before resizing; scoring uses the configured region polygon.
 Page limit is derived from selected-frame limit (four frames per page, maximum
 three pages). Sampling, image/byte sizes and memory retention are bounded.
 These are generic quality/diversity heuristics, not trained semantic detection.
+
+Before selecting visually novel extras, the selector plans the fewest usable
+extra frames needed to meet the temporal target around reserved observations.
+If that is impossible within the budget, it improves the largest fillable gaps
+inside the candidate. These temporal reservations can retain visually
+similar frames and share the existing selected-frame/page budget with phase,
+tail and post-window observations. Short or static scenes can still use fewer
+frames. The maximum gap is a target, not a guarantee when source sampling,
+missing recordings, quality rejection or the selected-frame budget constrain it.
+`coverage.temporal` contains `requested_max_gap_seconds`, `actual_max_gap_seconds`,
+`satisfied` and `gaps_exceeding_target`. A false `satisfied` adds an explicit
+warning; disabled targets and one-frame integration validations return null.
+Candidate boundaries are included when measuring gaps; post-window images do
+not hide missing observations inside the candidate. Temporal coverage alone
+does not establish continuous activity or a semantic outcome.
 Interpreting rotating dishes, vehicles or other subjects belongs to the worker.
 
 Evidence-only settings do not change the aggregation state digest. A different
