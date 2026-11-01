@@ -5,7 +5,7 @@ Start with [architecture, names and updates](deployment.md)
 CMA workers and optional NyxBot notifications.
 
 Run the generic core locally with the independent
-[Video Event Monitor add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline).
+[Video Event Monitor add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/video-event-monitor).
 The add-on repository packages a pinned core image and maps HA options; this
 repository owns aggregation, evidence, authentication and HTTP behavior.
 No cloud aggregation app or MongoDB is needed for this topology.
@@ -37,8 +37,9 @@ and sends a summary to a fixed authorized chat. See the
 
 1. Add `https://github.com/ChronoAIProject/nyx-homeassistant-node` to the HA add-on
    store. Install the ordinary NyxID Node, Home Assistant Event Relay and **Video
-   Event Monitor** (stable slug `cma-event-pipeline`; formerly displayed as CMA
-   Event Pipeline). The temporary Admin node is for management only.
+   Event Monitor** (slug `video-event-monitor`). For an older installation, follow
+   the [identity migration guide](https://github.com/ChronoAIProject/nyx-homeassistant-node/blob/main/docs/monitor-identity-migration.md)
+   first. The temporary Admin node is for management only.
 2. Copy an [example policy](../README.md#examples) outside the source checkout.
    Resolve its private source URI, selectors, conditions/windows, limits, output
    schema and evidence options. Supply the resolved JSON object serialized as
@@ -89,7 +90,7 @@ Point the Relay's destination at the Monitor's actual internal hostname:
 ```yaml
 destinations:
   - id: event_pipeline
-    url: http://0123abcd-cma-event-pipeline:8080/ingest
+    url: http://0123abcd-video-event-monitor:8080/ingest
     allow_local_http: true
     auth_type: bearer
     auth_token: "<same value as relay_token>"
@@ -182,7 +183,7 @@ or installed-image update.
 
 ## Migration and retirement
 
-The [add-on runbook](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline#persistence-and-migration)
+The [add-on runbook](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/video-event-monitor#persistence-and-migration)
 covers the exact source-pause/export/restore sequence. Keep one writer, the same
 aggregation policy and worker-facing service identity. Restore only into empty
 state; remove `state_import_url` after successful migration.

@@ -11,15 +11,18 @@ results and sends a summary. These have separate configuration and update steps.
 | Name | Meaning | Runs where |
 | --- | --- | --- |
 | **Video Event Monitor** | Product name and HA add-on display name | HA |
-| `frigate-cma-events` | This repository and the core image package | Inside Video Event Monitor on HA |
-| `cma-event-pipeline` | Stable HA add-on directory/slug in `nyx-homeassistant-node` | The same Video Event Monitor installation |
+| `video-event-monitor` | This repository and the core image package | Inside Video Event Monitor on HA |
+| `video-event-monitor` | HA add-on directory/slug in `nyx-homeassistant-node` | The same Video Event Monitor installation |
 | Home Assistant Event Relay | MQTT/HA event forwarding with its own durable queue | Separate HA add-on |
 | NyxID Node | Scoped access to configured HA/LAN HTTP services | Separate HA add-on |
 | CMA event channel and worker profile | Event routing, model, instructions and permissions | CMA |
 | Existing NyxBot and optional notification automation | Read results, produce and deliver a summary | NyxID, with the selected chat platform |
 
-The first three names identify one running monitoring application. Repository
-and image addresses retain their existing names. A NyxID service entry represents
+One product name, **Video Event Monitor**, and one technical name,
+`video-event-monitor`, identify the repository, core image and HA add-on. The
+HA wrapper image uses the same stem with a `-ha` suffix. Existing installations
+need a [complete-state identity migration](https://github.com/ChronoAIProject/nyx-homeassistant-node/blob/main/docs/monitor-identity-migration.md)
+before changing their HA slug. A NyxID service entry represents
 an authenticated route; several entries can expose one application with different
 credentials. Creating an entry does not deploy another container.
 
@@ -120,7 +123,7 @@ Core release sequence:
 
 ```text
 core code + version -> CI/tests -> immutable core image digest
-  -> HA cma-event-pipeline/Dockerfile pin + config.yaml version + changelog
+  -> HA video-event-monitor/Dockerfile pin + config.yaml version + changelog
   -> HA image CI/startup smoke -> Supervisor store refresh and add-on upgrade
   -> read installed version/options, test health and persistence
 ```
@@ -129,7 +132,7 @@ A repository merge or successful image build does not prove HA was upgraded.
 HA pins a core digest, so publishing core `main`/`latest` does not move an installed
 add-on. CI can build/publish images for documentation changes under its current
 triggers; that still does not update a running instance. The add-on version and
-core version are different release numbers. See [HA packaging](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline#packaging-and-updates).
+core version are different release numbers. See [HA packaging](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/video-event-monitor#packaging-and-updates).
 
 ## Applying a worker/channel change
 

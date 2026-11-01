@@ -1,6 +1,6 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>视频监控规则</title><link rel="stylesheet" href="./ui/style.css"></head>
-<body><header><div><small>HOME ASSISTANT · VIDEO MONITOR</small><h1 data-i18n="title">视频监控规则</h1><p data-i18n="introduction">先聚合事件，再提交有价值的画面。规则和记录保存在本地。</p></div><div class="header-actions"><label>语言 / Language<select id="language"><option value="zh">中文</option><option value="en">English</option></select></label><button id="refresh" data-i18n="refresh">刷新</button></div></header>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Video Event Monitor · 视频监控规则</title><link rel="stylesheet" href="./ui/style.css"></head>
+<body><header><div><small>HOME ASSISTANT · VIDEO EVENT MONITOR</small><h1 data-i18n="title">视频监控规则</h1><p data-i18n="introduction">先聚合事件，再提交有价值的画面。规则和记录保存在本地。</p></div><div class="header-actions"><label>语言 / Language<select id="language"><option value="zh">中文</option><option value="en">English</option></select></label><button id="refresh" data-i18n="refresh">刷新</button></div></header>
 <section id="auth" hidden><label><span data-i18n="token">管理 API Token</span> <input id="token" type="password" autocomplete="off" placeholder="仅在本次页面中使用" data-i18n-placeholder="tokenPlaceholder"></label><button id="connect" data-i18n="connect">连接</button><p data-i18n="ingressHint">也可从 Home Assistant 插件的「打开网页界面」进入。</p></section>
 <div id="message" role="status" aria-live="polite"></div><div id="summary" class="metrics"></div>
 <main><aside><div class="bar"><h2 data-i18n="rules">规则</h2><button id="new" data-i18n="newRule">＋ 新规则</button></div><div id="rules"></div></aside>

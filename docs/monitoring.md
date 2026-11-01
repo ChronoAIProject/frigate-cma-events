@@ -11,8 +11,9 @@ Visual interpretation remains the downstream worker's responsibility.
 ## Management page
 
 In HA, open **Settings → Add-ons → Video Event Monitor → Open web UI**.
-The existing add-on slug and image package are unchanged, so upgrading an
-installed CMA Event Pipeline preserves its data and service routes.
+The current add-on slug is `video-event-monitor`. Older installations must use
+the [complete-state migration guide](https://github.com/ChronoAIProject/nyx-homeassistant-node/blob/main/docs/monitor-identity-migration.md)
+to preserve rules, history and queues before changing their installation ID.
 
 The page lists rules and their current switches, versions and delivery counts.
 Choose **New rule**, set a stable lowercase ID and display label, then select a

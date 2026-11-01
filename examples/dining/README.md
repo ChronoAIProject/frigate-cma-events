@@ -4,7 +4,7 @@ For names, deployment locations and update ownership, start with the
 [architecture/deployment overview](../../docs/deployment.md)
 ([中文](../../docs/deployment.zh-CN.md)). This example uses the HA **Video Event
 Monitor**, a remote CMA analysis worker and an optional existing NyxBot summary
-receiver. `frigate-cma-events` and the HA slug `cma-event-pipeline` identify the
+receiver. `video-event-monitor` and the HA slug `video-event-monitor` identify the
 same monitoring implementation and its packaging.
 
 This is a deployable example of the generic event pipeline. Frigate
@@ -58,7 +58,7 @@ The hook and receiver are explicitly configured and disabled by default.
 | Frigate + MQTT broker | Existing local services: detections, recordings and review messages |
 | HA node + Event Relay | [nyx-homeassistant-node](https://github.com/ChronoAIProject/nyx-homeassistant-node): local proxy and configurable event forwarding |
 | Aggregation + evidence + outboxes | This repository owns the generic core; one process/state set |
-| HA Monitor packaging | `nyx-homeassistant-node/cma-event-pipeline`; pinned core image, HA options, local SQLite `/data/state` |
+| HA Monitor packaging | `nyx-homeassistant-node/video-event-monitor`; pinned core image, HA options, local SQLite `/data/state` |
 | Event channel + worker | [CMA](https://github.com/ChronoAIProject/cma): route candidates and execute visual analysis |
 | Credentials + service routes + NyxBot | [NyxID](https://github.com/ChronoAIProject/NyxID): broker scoped access and provide the existing user-facing assistant |
 | Personal installation | Private platform settings/files; never committed to any of these repositories |
@@ -193,7 +193,7 @@ set -a
 . "$DINING_SITE_DIR/site.env"
 set +a
 python3 examples/dining/render.py \
-  --image ghcr.io/chronoaiproject/frigate-cma-events@sha256:YOUR_PUBLISHED_DIGEST \
+  --image ghcr.io/chronoaiproject/video-event-monitor@sha256:YOUR_PUBLISHED_DIGEST \
   --output-dir "$DINING_SITE_DIR/bundle"
 ```
 

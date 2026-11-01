@@ -11,7 +11,7 @@ function editorText() {
   $('revision').textContent = selected ? t('currentRevision', {revision: selected.revision}) : $('editor').hidden ? '' : t('unsaved');
 }
 function applyLanguage() {
-  document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en'; document.title = t('title'); $('language').value = language;
+  document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en'; document.title = 'Video Event Monitor · ' + t('title'); $('language').value = language;
   for (const node of document.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
   for (const node of document.querySelectorAll('[data-i18n-placeholder]')) node.placeholder = t(node.dataset.i18nPlaceholder);
   for (const node of document.querySelectorAll('[data-i18n-aria-label]')) node.setAttribute('aria-label', t(node.dataset.i18nAriaLabel));
