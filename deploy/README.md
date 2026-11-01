@@ -1,5 +1,10 @@
 # Cloud deployment (optional)
 
+See [architecture and updates](../docs/deployment.md)
+([中文](../docs/deployment.zh-CN.md)) before choosing placement. The core in this
+repository normally runs inside the HA **Video Event Monitor** add-on. The CMA
+analysis worker is a separate remote runtime in either placement.
+
 For aggregation beside HA/Frigate, use the [Home Assistant deployment guide](../docs/home-assistant.md).
 That topology uses local SQLite and needs no cloud app or MongoDB. This document
 covers the alternative remote deployment and the cloud-only app-spec renderer.
@@ -55,7 +60,9 @@ If the platform cannot make a non-root PVC writable, set
 `PERSISTENCE_BACKEND=mongodb` before rendering. The renderer then adds the
 platform MongoDB add-on and wires its URI/database fields into the service;
 the service keeps its SQLite working copy in ephemeral storage and snapshots
-it to MongoDB after each admitted mutation.
+it to MongoDB after each admitted mutation. This legacy snapshot backend does
+not preserve the multi-rule registry: managed rule edits require a writable
+persistent data volume. See [rule storage limits](../docs/monitoring.md#persistence-and-revisions).
 
 The image runs as an unprivileged user. The persistent volume must therefore be
 writable by that user (for example, through the platform's pod `fsGroup` or an
@@ -121,3 +128,11 @@ Retire obsolete CMA Agents/sandboxes through CMA, observing their terminal
 states and managed-key revocation. Keep the current worker, channel and local
 NyxID routing/delegation/operator services. Update private inventories and
 assistant operational memory, without publishing site values or receipts.
+
+## Updates
+
+Render/apply a new cloud app spec and secrets when its runtime or deployment
+configuration changes; verify the actual running image and state afterward.
+Apply worker/channel and notification changes through CMA/NyxID separately.
+Neither renderer publishes those resources automatically. For the HA placement,
+use the [HA image/configuration update matrix](../docs/deployment.md#which-changes-need-an-ha-upgrade).
