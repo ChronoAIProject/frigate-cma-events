@@ -444,7 +444,7 @@ class State:
                 method="POST",
                 headers={
                     "Content-Type": "application/cloudevents+json",
-                    "User-Agent": "frigate-cma-events/0.2",
+                    "User-Agent": "video-event-monitor/0.3.3",
                     "webhook-id": webhook_id,
                     "webhook-timestamp": timestamp,
                     "webhook-signature": cma_signature(self.config.cma_hmac_secret, webhook_id, timestamp, row["body"]),
@@ -559,7 +559,7 @@ def create_app(config=None):
                 pass
             app.state.monitor.close()
 
-    app = FastAPI(title="Video Event Monitor", version="0.3.2", lifespan=lifespan,
+    app = FastAPI(title="Video Event Monitor", version="0.3.3", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -617,7 +617,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.3.2", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.3.3", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")

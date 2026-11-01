@@ -43,7 +43,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/chronoaiproject/frigate-cma-events
+          images: ghcr.io/chronoaiproject/video-event-monitor
           tags: |
             type=sha,format=long
             type=raw,value=latest,enable={{is_default_branch}}

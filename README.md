@@ -26,8 +26,8 @@ ON NYXID (optional):                         existing NyxBot -> chosen chat
 
 The service performs no model inference, runs no user scripts and sends no
 chat messages. The published image is
-`ghcr.io/chronoaiproject/frigate-cma-events`; the repository/image address remains
-usable by existing installations.
+`ghcr.io/chronoaiproject/video-event-monitor`. The HA wrapper image is
+`ghcr.io/chronoaiproject/video-event-monitor-ha`.
 
 ## Examples
 
@@ -37,9 +37,10 @@ usable by existing installations.
 | [HA activity](examples/ha-state/README.md) | Selected state transitions, grouped and counted per entity | None | Metadata summary, chosen destination |
 | [Vehicle visits](examples/driveway/README.md) | Car/motorcycle intervals in a configured region | Vehicle views | Configured activity worker |
 
-`frigate-cma-events` is this core repository/image name; `cma-event-pipeline`
-is the stable HA add-on slug. Both refer to the **Video Event Monitor** application
-running on HA. CMA workers run remotely. See the [component map](docs/deployment.md#names-and-deployment-locations)
+**Video Event Monitor** uses `video-event-monitor` for its repository, core image,
+HA directory and add-on slug. CMA workers run remotely. Existing HA installations
+must follow the [identity migration guide](https://github.com/ChronoAIProject/nyx-homeassistant-node/blob/main/docs/monitor-identity-migration.md)
+before switching to the renamed add-on. See the [component map](docs/deployment.md#names-and-deployment-locations)
 for repository, runtime and platform-configuration ownership.
 
 Each example uses the same runtime. Names, sources, entity/camera selectors,
@@ -247,7 +248,7 @@ Licensed under Apache-2.0.
 See the [complete HA guide](docs/home-assistant.md) for option mapping, local
 Relay routing, managed-worker delegation, testing and legacy-resource retirement.
 
-The [Video Event Monitor add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline)
+The [Video Event Monitor add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/video-event-monitor)
 runs this same image/core beside HA Event Relay and Frigate. It stores SQLite in
 the add-on's persistent `/data`, without MongoDB or Supervisor administration
 permission. A NyxID node exposes only the configured worker service; no host port

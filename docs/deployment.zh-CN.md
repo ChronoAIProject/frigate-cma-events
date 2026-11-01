@@ -10,15 +10,17 @@ Video Event Monitor 在 HA 上聚合事件、筛选历史画面；CMA 在云端�
 | 名称 | 含义 | 运行位置 |
 | --- | --- | --- |
 | **Video Event Monitor** | 产品名称、HA 插件显示名称 | HA |
-| `frigate-cma-events` | 本仓库名称、核心镜像包名 | 上述 HA 插件内部 |
-| `cma-event-pipeline` | `nyx-homeassistant-node` 中保留的目录和插件 slug | 同一个 Video Event Monitor 实例 |
+| `video-event-monitor` | 本仓库名称、核心镜像包名 | 上述 HA 插件内部 |
+| `video-event-monitor` | `nyx-homeassistant-node` 中的目录和插件 slug | 同一个 Video Event Monitor 实例 |
 | Home Assistant Event Relay | 订阅 MQTT/HA 事件，过滤并可靠转发 | HA 上的独立插件 |
 | NyxID Node | 按授权代理 HA/局域网 HTTP 服务、注入本地凭证 | HA 上的独立插件 |
 | CMA 事件通道与 Worker profile | 配置事件路由、模型、提示词和权限 | CMA 云端 |
 | 已有 NyxBot 与可选通知自动化 | 查结果、生成总结、发到指定聊天 | NyxID 与相应聊天平台 |
 
-前三个名称对应同一个监控程序。仓库、镜像和 slug 保留原地址，界面和说明统一使用
-Video Event Monitor。NyxID 中的多个 service 条目用于不同权限的访问入口，
+产品统一叫 **Video Event Monitor**，仓库、核心镜像、HA 目录和插件 slug 统一使用
+`video-event-monitor`；HA 包装镜像仅增加 `-ha` 后缀。已有安装需要先完成
+[完整数据迁移](https://github.com/ChronoAIProject/nyx-homeassistant-node/blob/main/docs/monitor-identity-migration.md)，再切换 HA 安装 ID。
+NyxID 中的多个 service 条目用于不同权限的访问入口，
 创建 service 条目不会额外部署一个应用容器。
 
 [HA 仓库](https://github.com/ChronoAIProject/nyx-homeassistant-node)维护插件包装、
@@ -108,7 +110,7 @@ HA 规则页面目前只管理规则。还没有一条命令可以同步 HA、CM
 
 ```text
 修改核心程序及版本 -> CI/测试 -> 发布不可变核心镜像 digest
-  -> 更新 HA cma-event-pipeline/Dockerfile 的 pin、config.yaml 版本及 changelog
+  -> 更新 HA video-event-monitor/Dockerfile 的 pin、config.yaml 版本及 changelog
   -> HA 镜像构建和启动验收 -> 刷新商店并升级已安装插件
   -> 独立核对已安装版本、选项、健康和持久化
 ```
@@ -116,7 +118,7 @@ HA 规则页面目前只管理规则。还没有一条命令可以同步 HA、CM
 合并 PR 或成功构建镜像都不等于 HA 已升级。HA 插件固定核心 digest，发布核心
 `main`/`latest` 不会自动改变已安装插件。现有 CI 触发条件可能在文档提交时也构建或发布镜像，
 这仍不表示正在运行的实例已更新。插件版本与核心版本各自编号。
-具体包装流程见[HA 插件说明](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline#packaging-and-updates)。
+具体包装流程见[HA 插件说明](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/video-event-monitor#packaging-and-updates)。
 
 ## 更新 Worker 或通道的步骤
 
