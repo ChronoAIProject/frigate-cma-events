@@ -1,13 +1,17 @@
 # Home Assistant deployment
 
+Start with [architecture, names and updates](deployment.md)
+([中文](deployment.zh-CN.md)) for the relationship between this core, HA packaging,
+CMA workers and optional NyxBot notifications.
+
 Run the generic core locally with the independent
-[CMA Event Pipeline add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline).
+[Video Event Monitor add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline).
 The add-on repository packages a pinned core image and maps HA options; this
 repository owns aggregation, evidence, authentication and HTTP behavior.
 No cloud aggregation app or MongoDB is needed for this topology.
 
 ```text
-Local camera -> Frigate -> MQTT -> HA Event Relay -> Pipeline /ingest
+Local camera -> Frigate -> MQTT -> HA Event Relay -> Video Event Monitor /ingest
                                                      |
                                          rules + windows + dedupe + limits
                                                      |
@@ -15,22 +19,26 @@ Local camera -> Frigate -> MQTT -> HA Event Relay -> Pipeline /ingest
                                                      |
                                                 remote worker -> destination
                                                      |
-                   NyxID worker service -> ordinary HA node -> Pipeline
+                   NyxID worker service -> ordinary HA node -> Monitor
                                                          /evidence and /results
                                                               |
                                                      local Frigate recordings
 ```
 
-The worker performs visual inference; Pipeline performs deterministic metadata
+The worker performs visual inference; Monitor performs deterministic metadata
 processing and heuristic historical selection. Raw recordings stay in Frigate's
 storage. Selected evidence is transmitted to the remote worker. NyxBot can query
-the configured destination separately; the worker is not a replacement NyxBot.
+the configured destination separately. An optional worker completion hook calls
+a scoped NyxID webhook, where an existing NyxBot independently reads the result
+and sends a summary to a fixed authorized chat. See the
+[dining hook](../examples/dining/README.md#optional-completion-summaries).
 
 ## Install and configure
 
 1. Add `https://github.com/ChronoAIProject/nyx-homeassistant-node` to the HA add-on
    store. Install the ordinary NyxID Node, Home Assistant Event Relay and **Video
-   Event Monitor** (existing CMA Event Pipeline add-on slug). The temporary Admin node is for management only.
+   Event Monitor** (stable slug `cma-event-pipeline`; formerly displayed as CMA
+   Event Pipeline). The temporary Admin node is for management only.
 2. Copy an [example policy](../README.md#examples) outside the source checkout.
    Resolve its private source URI, selectors, conditions/windows, limits, output
    schema and evidence options. Supply the resolved JSON object serialized as
@@ -48,6 +56,7 @@ the configured destination separately; the worker is not a replacement NyxBot.
 | `worker_token` | `WORKER_TOKEN`: stored-candidate evidence and result callbacks only |
 | `worker_service` | `WORKER_SERVICE`: actual worker-facing NyxID service slug |
 | `worker_name` | `WORKER_NAME`: non-sensitive public display name |
+| `cma_context_config`, `cma_context_token` | Optional cleanup policy and separate CMA management credential; exact dedicated workspace/native profile pins |
 | `cma_event_url` | Exact custom event URL returned by CMA; preserve the opaque reference |
 | `cma_hmac_key_id`, `cma_hmac_secret` | Matching CMA channel signing credentials |
 | `frigate_url` | Explicit local Frigate HTTP/HTTPS base; actual add-on hostname and API port |
@@ -75,7 +84,7 @@ object tracks, region geometry and historical recording snapshots locally.
 It sends a bearer only when `frigate_api_key` is configured. The unauthenticated
 internal Frigate API must not be exposed publicly.
 
-Point the Relay's destination at the Pipeline's actual internal hostname:
+Point the Relay's destination at the Monitor's actual internal hostname:
 
 ```yaml
 destinations:
@@ -96,17 +105,17 @@ For multiple camera rules, forward all review subjects and a global heartbeat
 with `subject: "*"`. Unmatched events do not create CMA work.
 
 During migration, preserve an existing destination ID while changing its URL:
-queued messages reference that ID. Pipeline's CMA outbox and Relay's delivery
+queued messages reference that ID. Monitor's CMA outbox and Relay's delivery
 queue are independent; a zero CMA pending count does not prove Relay drained.
 
 ## Worker and operator access
 
-Create a node-bound bearer service for the Pipeline's internal URL, with node
+Create a node-bound bearer service for the Monitor's internal URL, with node
 binding and auth set in the initial service-create request. In the ordinary
 node's `services` list, install that actual slug/URL with
 `Authorization: Bearer <worker_token>`. Create a separate owner-only operator
 service injecting `api_token`; workers must not get that route or credential.
-The HA node performs credential injection; the Pipeline is a separate container.
+The HA node performs credential injection; the Monitor is a separate container.
 
 A caller needs both service and node grants for a direct node-bound route.
 CMA's current managed-key contract does not retain node grants
@@ -120,7 +129,7 @@ CMA managed worker key (grant: existing worker-facing service)
   -> HTTPS NyxID proxy URL of the inner node-bound service
   -> ordinary HA node
        injects worker_token
-  -> Pipeline /evidence/{candidate_id} or /results/{candidate_id}
+  -> Monitor /evidence/{candidate_id} or /results/{candidate_id}
 ```
 
 The dedicated key must grant exactly the inner service and its backing node,
@@ -128,7 +137,7 @@ with broad access flags false. Keep the worker-facing service ID during migratio
 so existing grants/prompt/channel remain valid. Leave CMA-managed keys under
 CMA lifecycle control. Store the delegate privately, record its expiry, rotate
 it before expiry, then verify actual worker access. This routing adds no cloud
-application; these entries represent different auth roles for one Pipeline.
+application; these entries represent different auth roles for one Monitor.
 
 The worker retains its normal model and destination grants. Do not give it raw
 Frigate access for this application. Both proxy hops must pass response bodies
@@ -152,6 +161,24 @@ and result POSTs; validate them through the actual worker route.
   directories, and use HA backups; images are volatile bounded caches.
 - Monitor storage: state is not automatically pruned. Raw recording retention
   and NAS capacity belong to Frigate and have separate settings.
+
+## Updates
+
+Saving rules in the HA page/API creates persistent revisions without an image
+upgrade. Changing `pipeline_config` after import does not edit them. HA connection,
+credential, timer and cleanup options require a Monitor restart. Worker prompts,
+model/grants and notification instructions are applied through CMA/NyxID APIs.
+When a replacement channel has a new URL/HMAC or workspace/profile identity,
+also update the matching HA options and cleanup pins before switching traffic.
+
+Runtime or UI code changes require a published core image, a new pinned digest
+and version in the HA package, a published HA image and an installed add-on
+upgrade. Reading core `main`, merging a template change or publishing an image
+does not prove the installed HA runtime changed. Check installed add-on info and
+the deployed core health/version, then verify state and actual worker behavior.
+The [update matrix and rollout procedure](deployment.md#which-changes-need-an-ha-upgrade)
+cover these separate cases. A documentation change requires no live configuration
+or installed-image update.
 
 ## Migration and retirement
 

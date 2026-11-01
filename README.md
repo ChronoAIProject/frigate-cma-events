@@ -1,5 +1,8 @@
 # Video Event Monitor
 
+[Architecture, configuration and updates](docs/deployment.md) ·
+[架构、配置与更新总览（中文）](docs/deployment.zh-CN.md)
+
 A local video monitoring service with an HA management page, an owner API and
 persistent versioned rules for turning Frigate reviews, Home Assistant events and
 custom CloudEvents into bounded activity candidates for a CMA worker. The
@@ -8,12 +11,17 @@ limits, optional historical evidence, and durable signed delivery. Workers
 perform the application-specific analysis and verified destination writes.
 
 ```text
-HA / MQTT / Frigate -> HA Event Relay -> /ingest
-  -> configured source adapter + predicates
-  -> per-subject windows + conditions + limits
-  -> durable outbox -> owner's CMA event channel -> configured worker/destination
-                         |
-              optional bounded historical evidence
+ON HA: Frigate / MQTT / HA events -> Event Relay -> Video Event Monitor
+                                                 rules + durable outbox
+                                                          |
+                                                   signed candidate
+                                                          v
+ON CMA:                                           per-event worker
+                                           pull bounded evidence from HA
+                                           analyze -> write + verify result
+                                                          |
+ON NYXID (optional):                         existing NyxBot -> chosen chat
+                                            webhook + independent result read
 ```
 
 The service performs no model inference, runs no user scripts and sends no
@@ -29,11 +37,17 @@ usable by existing installations.
 | [HA activity](examples/ha-state/README.md) | Selected state transitions, grouped and counted per entity | None | Metadata summary, chosen destination |
 | [Vehicle visits](examples/driveway/README.md) | Car/motorcycle intervals in a configured region | Vehicle views | Configured activity worker |
 
+`frigate-cma-events` is this core repository/image name; `cma-event-pipeline`
+is the stable HA add-on slug. Both refer to the **Video Event Monitor** application
+running on HA. CMA workers run remotely. See the [component map](docs/deployment.md#names-and-deployment-locations)
+for repository, runtime and platform-configuration ownership.
+
 Each example uses the same runtime. Names, sources, entity/camera selectors,
 regions, conditions, output event types, evidence labels and selection weights
 are deployment configuration. Public examples contain synthetic values only.
-The dining renderer produces a complete private installation bundle including
-`pipeline.json`, worker instructions, channel and Sheet settings.
+The dining renderer produces a private cloud app bundle including `pipeline.json`,
+worker instructions, channel and Sheet settings. It does not install HA or apply
+remote profiles; HA users follow the separate local installation procedure.
 
 ## Deployment choices
 
@@ -48,7 +62,26 @@ Its app-spec renderer and MongoDB snapshot support are optional; they are not
 prerequisites for running on HA. Use a persistent local data volume for managed rules and one writer per state
 set. Separate owners/credentials use separate deployments.
 
+## Updates and deployment boundaries
+
+| Change | Apply where |
+| --- | --- |
+| Rules/evidence settings | Monitor HA page/owner API; persistent new revision |
+| HA connections/secrets/timers/cleanup pins | HA options, then restart the affected add-on |
+| Worker prompt/model/permissions or completion hook | CMA profile/channel and, for notifications, NyxID receiver; synchronize changed channel/cleanup settings to HA |
+| Monitor runtime/UI code | Publish core image, update HA digest/version, publish HA image, then upgrade the installed add-on |
+| Documentation | Publish docs; installed services keep their current code/configuration |
+
+One repository merge does not deploy all three platforms. There is currently no
+single deployment command. Use the [complete update procedure](docs/deployment.md#which-changes-need-an-ha-upgrade)
+and keep one private installation inventory. The HA page manages local rules;
+worker templates become active after applying their CMA configuration.
+
 ## Configuration
+
+For HA installation, set the first-start policy in private HA options, then edit
+rules in the management page/API. See [HA configuration](docs/home-assistant.md).
+The following renderer is for the optional cloud deployment:
 
 Supply a validated JSON document through `PIPELINE_CONFIG_FILE` or
 `PIPELINE_CONFIG_JSON`. The [pipeline guide](docs/pipeline.md) describes the
@@ -66,7 +99,8 @@ Secrets are declared by name, never copied into plain env or configuration.
 `PROVIDER_TOKEN` and `API_TOKEN` are distinct mounted secrets of at least 32
 characters; `RELAY_TOKEN` authenticates `/ingest`. Tokens support `_FILE`.
 Configure `CMA_EVENT_URL`, `CMA_HMAC_KEY_ID` and mounted `CMA_HMAC_SECRET` to send
-candidates to the owner's existing CMA channel/Agent. No new provider registry
+candidates to the owner's CMA profile channel, using `per_event` for independent
+tasks. No new provider registry
 entry or administrator access is required for normal relay ingestion.
 
 For worker callbacks, optionally configure `WORKER_SERVICE` (the owner's NyxID
@@ -172,6 +206,10 @@ installation details are never in public health output. See the
 | `POST /api/validation` | Operator | Explicit one-frame Frigate integration validation |
 | `GET /api/state/export` | Operator, processing paused | Portable state snapshot for offline migration |
 
+These unversioned policy/evidence/result paths address imported `default` v1.
+Use the [rule API](docs/monitoring.md#owner-api) for other revisions; events carry
+their exact versioned evidence/result paths.
+
 Callbacks are worker reports, not independent proof of external writes. Their
 allowed statuses/fields come from `output`. Application workers must verify
 side effects themselves. `integration_test` never asserts a real outcome.
@@ -209,7 +247,7 @@ Licensed under Apache-2.0.
 See the [complete HA guide](docs/home-assistant.md) for option mapping, local
 Relay routing, managed-worker delegation, testing and legacy-resource retirement.
 
-The [CMA Event Pipeline add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline)
+The [Video Event Monitor add-on](https://github.com/ChronoAIProject/nyx-homeassistant-node/tree/main/cma-event-pipeline)
 runs this same image/core beside HA Event Relay and Frigate. It stores SQLite in
 the add-on's persistent `/data`, without MongoDB or Supervisor administration
 permission. A NyxID node exposes only the configured worker service; no host port

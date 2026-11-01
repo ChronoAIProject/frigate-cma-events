@@ -1,5 +1,9 @@
 # Pipeline configuration
 
+This document defines the rule JSON schema. See
+[architecture and updates](deployment.md) ([中文](deployment.zh-CN.md)) for
+where those rules, remote worker instructions and connection settings live.
+
 A pipeline is a version-1 JSON document, at most 64 KiB. Unknown keys and
 unsupported operators/adapters are rejected. The startup document from
 `PIPELINE_CONFIG_FILE` or `PIPELINE_CONFIG_JSON` is imported once. Owners manage
@@ -218,7 +222,10 @@ persistent state. The old Frigate `rules`/`reviews` replay shape remains support
    The matching policy digest permits this change without a state reset. Remove
    the old camera/seat/table/rule env inputs from the deployment.
 4. Different aggregation policy is rejected against existing state. Use a new
-   app/state directory for that case. Changing only evidence options is allowed.
+   app/state directory for that legacy migration. On a local core 0.3 installation,
+   create/edit versioned rules through the management API; their isolated state
+   allows policy changes without replacing the installation's history.
+   Changing only legacy evidence options is allowed.
 
 Keep a private deployment/spec backup and use one writer during migration.
 CMA output type, legacy aliases and ID prefix remain explicit in the dining

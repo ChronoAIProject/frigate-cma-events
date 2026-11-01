@@ -1,5 +1,8 @@
 # Video monitoring rules
 
+For component locations and update ownership, see the
+[deployment overview](deployment.md) ([中文](deployment.zh-CN.md)).
+
 Core 0.3 adds a local multi-rule registry and management page. The same runtime
 supports camera activity, vehicle visits, dining and generic HA/CloudEvent
 summaries. Rules contain declarative parameters, never executable scripts.
@@ -48,6 +51,13 @@ and sets its own `output.event_type` and result contract. Configure the CMA
 channel's subscriptions and consumer for those event types. A dining consumer
 does not automatically become a general security or vehicle-analysis worker.
 Separate owners/credential boundaries require separate deployments.
+
+Saving a rule does not deploy a worker, change its model/prompt/service grants,
+or configure a NyxBot notification receiver. Those are CMA/NyxID settings; see
+[configuration authority](deployment.md#configuration-authority). The optional
+completion hook executes in the worker after result verification. The HA page
+reports the worker's callback; it does not verify the external destination or
+native chat receipt on the owner's behalf.
 
 ## Persistence and revisions
 
