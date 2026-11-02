@@ -168,6 +168,9 @@ Options and defaults:
 | `tail_coverage_seconds` | 180 / 1..3600 |
 | `post_window_seconds` | 0 / 0..300; optional observation after the candidate |
 | `max_selected_gap_seconds` | 300 / 0..86400; 0 disables temporal gap filling |
+| `recording_alignment_seconds` | 0 / 0..10; 0 disables recording-index alignment and retries |
+| `object_tail_frames` | 0 / 0..3; optional reservations before configured tracks end |
+| `object_tail_seconds` | 60 / 1..300; lookback for object-tail reservations |
 
 The imported startup policy supports `EVIDENCE_<UPPERCASE_NAME>` env overrides.
 Managed revisions use their own `evidence.options` and explicit defaults. Native
@@ -175,6 +178,27 @@ frames are cropped before resizing; scoring uses the configured region polygon.
 Page limit is derived from selected-frame limit (four frames per page, maximum
 three pages). Sampling, image/byte sizes and memory retention are bounded.
 These are generic quality/diversity heuristics, not trained semantic detection.
+
+When recording alignment is enabled, a bounded recording-index lookup limits
+each historical sample to at most two nearby recorded times within the configured
+tolerance. Candidate observations stay inside the candidate; post-window
+observations stay between its end and the configured post-window boundary.
+Retries share the existing source-frame, time and memory budgets. An unavailable
+or invalid index falls back to exact historical requests with an explicit warning;
+an empty index preserves missing history. There is no live or distant fallback.
+Frame `timestamp` and image labels report the actual snapshot request time;
+`requested_timestamp` and `timestamp_adjustment_seconds` retain the intended
+sample and adjustment. Phase/sampling labels describe the original sample plan.
+`coverage.failed_request_timestamps` lists failed snapshot attempts.
+
+Optional object-tail observations reserve frames two seconds before the last
+configured object track ends, plus evenly spaced lookbacks up to
+`object_tail_seconds` when more frames are requested, clamped to track activity.
+They share existing candidate-third source quotas and selected-frame/page limits.
+Usable object-tail frames are reserved before temporal gap filling and novelty
+selection. `coverage.object_tail_{requested,available,selected,missing}_timestamps`
+and warnings expose missing or unselected observations. Track disappearance is
+not proof of clearing, consumption or any other semantic outcome.
 
 Before selecting visually novel extras, the selector plans the fewest usable
 extra frames needed to meet the temporal target around reserved observations.

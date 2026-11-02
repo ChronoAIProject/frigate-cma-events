@@ -41,12 +41,15 @@ class EvidenceOptions:
     tail_coverage_seconds: float = 180
     post_window_seconds: float = 0
     max_selected_gap_seconds: float = 300.0
+    recording_alignment_seconds: float = 0
+    object_tail_frames: int = 0
+    object_tail_seconds: float = 60
 
     def __post_init__(self):
         if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
             raise ValueError("Evidence options require finite numeric values")
         if any(type(getattr(self, name)) is not int for name in (
-                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames", "tail_coverage_frames")):
+                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames", "tail_coverage_frames", "object_tail_frames")):
             raise ValueError("Evidence dimensions, quality and frame counts require integers")
         if not 0 <= self.crop_padding <= 0.15:
             raise ValueError("EVIDENCE_CROP_PADDING must be between 0 and 0.15")
@@ -62,6 +65,10 @@ class EvidenceOptions:
             raise ValueError("Post-window observation must be between 0 and 300 seconds")
         if not 0 <= self.max_selected_gap_seconds <= 86400:
             raise ValueError("Selected-observation gap must be between 0 and 86400 seconds")
+        if not 0 <= self.recording_alignment_seconds <= 10:
+            raise ValueError("Recording alignment must be between 0 and 10 seconds")
+        if not 0 <= self.object_tail_frames <= 3 or not 1 <= self.object_tail_seconds <= 300:
+            raise ValueError("Object-tail observations require 0..3 frames and a 1..300 second window")
         if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
             raise ValueError("Invalid evidence burst or sampling time budget")
         if any(not finite(v) or not 0 <= v <= 1 for v in (self.density_weight, self.quality_weight,
@@ -129,6 +136,9 @@ def sample_frames(start, end, events, options):
     activity_end = max(e["end"] for e in events) if events else end
     activity_duration = activity_end - activity_start
     duration = end - start
+    object_tail = ([max(activity_start, activity_end - (2 if j == 0 else
+                    options.object_tail_seconds * j / max(1, options.object_tail_frames - 1)))
+                    for j in range(options.object_tail_frames)] if events else [])
     tail_start = max(start, end - options.tail_coverage_seconds)
     burst_targets = [[], [], []]
     offsets = (0, -1, 1, -2, 2)
@@ -160,7 +170,9 @@ def sample_frames(start, end, events, options):
         broad = [(lo + (hi - lo) * (j + 0.5) / broad_count, "interval_coverage")
                  for j in range(broad_count)] if broad_count else []
         # Reserve tail observations before anchor bursts or broad samples.
-        times = tail_times + bursts + broad
+        object_times = [(t, "object_tail") for t in object_tail
+                        if i == (min(2, max(0, int((t - start) / duration * 3))) if duration else 0)]
+        times = tail_times + object_times + bursts + broad
         # Fill slots when anchors or interval points coincide, staying within the
         # full candidate interval and preserving the source-frame budget.
         times += [(lo + (hi - lo) * (j + 0.5) / max(1, quota * 2), "interval_coverage")
@@ -272,6 +284,16 @@ def select_diverse_frames(records, limit, options=None, *, interval=None):
             tail["visual_novelty"] = None
             chosen.append(tail)
 
+    # Preserve an observation before configured object tracks disappear. Track
+    # disappearance is an anchor, not proof of removal, consumption or meal end.
+    object_tails = [r for _, _, _, pool in pools for r in pool if r.get("sampling") == "object_tail"]
+    for record in sorted(object_tails, key=lambda r: r["timestamp"], reverse=True):
+        if len(chosen) >= limit:
+            break
+        if all(record is not r for r in chosen):
+            record["visual_novelty"] = None
+            chosen.append(record)
+
     if options.max_selected_gap_seconds and records:
         available = [r for _, _, _, pool in pools for r in pool
                      if r.get("sampling") != "post_window"]
@@ -334,6 +356,30 @@ def unobserved_intervals(start, end, observed_timestamps):
     return [[left, right] for left, right in zip(points, points[1:]) if right > left]
 
 
+def recording_targets(timestamp, intervals, lower, upper, tolerance):
+    """At most two nearby recorded times, always inside the requested window.
+
+    An empty index is missing history, not permission to substitute a live view
+    or a distant frame. The second time is a bounded seek/decode retry.
+    """
+    candidates, covered = [], False
+    exact = round(timestamp, 3)
+    for left, right in intervals:
+        covered |= (left <= exact < right and lower <= exact <= upper
+                    and abs(exact - timestamp) <= tolerance)
+        margin = min(0.25, (right - left) / 4)
+        lo, hi = max(lower, left + margin), min(upper, right - margin)
+        if lo > hi:
+            continue
+        for value in (min(hi, max(lo, timestamp)), timestamp - 1, timestamp + 1):
+            value = round(value, 3)
+            if lo <= value <= hi and abs(value - timestamp) <= tolerance:
+                candidates.append(value)
+    ordered = ([exact] if covered else []) + sorted(
+        set(candidates), key=lambda t: (abs(t - timestamp), t))
+    return list(dict.fromkeys(ordered))[:2]
+
+
 class FrigateEvidence:
     def __init__(self, proxy_url, key, camera, crop_zone="", options=None, *, labels=(),
                  version="historical-diversity-v1", cautions=(), aliases=None, allow_http=False):
@@ -349,7 +395,7 @@ class FrigateEvidence:
         self.opener = build_opener(NoRedirect)
 
     def get(self, path, limit=2 * 1024 * 1024, timeout=15):
-        headers = {"User-Agent": "video-event-monitor/0.3.3"}
+        headers = {"User-Agent": "video-event-monitor/0.3.4"}
         if self.key:
             headers["Authorization"] = "Bearer " + self.key
         request = Request(self.url + "/" + path, headers=headers)
@@ -410,6 +456,23 @@ class FrigateEvidence:
         except (ValueError, TypeError, AttributeError) as exc:
             raise EvidenceUnavailable("invalid_object_metadata") from exc
 
+    def recording_intervals(self, start, end, timeout):
+        query = urlencode({"after": start, "before": end})
+        try:
+            rows = json.loads(self.get("api/" + quote(self.camera, safe="") + "/recordings?" + query,
+                                       timeout=timeout))
+            if not isinstance(rows, list) or len(rows) > 5000:
+                raise ValueError()
+            intervals = []
+            for row in rows:
+                left, right = row["start_time"], row["end_time"]
+                if not finite(left) or not finite(right) or right <= left:
+                    raise ValueError()
+                intervals.append((left, right))
+            return sorted(intervals)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise EvidenceUnavailable("invalid_recording_index") from exc
+
     def crop_bounds(self):
         """Use the deployment's normalized Frigate region geometry."""
         self.roi_polygon = None
@@ -461,52 +524,101 @@ class FrigateEvidence:
             warnings.append(str(exc))
         if crop is None:
             warnings.append("Region crop unavailable; full-scene evidence has lower region detail.")
+        intervals = None
+        if self.options.recording_alignment_seconds:
+            try:
+                intervals = self.recording_intervals(start, end + self.options.post_window_seconds,
+                                                     max(0.1, min(6, deadline - time.monotonic())))
+            except EvidenceUnavailable as exc:
+                warnings.append(str(exc))
+                warnings.append("Recording index unavailable; exact historical requests only.")
         records, missing, attempted, retained_bytes = [], [], 0, 0
+        failed_requests, used_requests = [], set()
+        request_limit = 1 if candidate.get("test") else self.options.sample_frames
         for selection in selections:
-            timestamp = selection["timestamp"]
+            requested = selection["timestamp"]
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or retained_bytes >= 24 * 1024 * 1024:
+            if remaining <= 0 or retained_bytes >= 24 * 1024 * 1024 or attempted >= request_limit:
                 warnings.append("Candidate sampling budget exhausted; partial coverage only.")
                 break
-            # Fetch native resolution first. Resizing the whole room before
-            # cropping destroys small region details.
-            path = "api/" + quote(self.camera, safe="") + f"/recordings/{timestamp:.3f}/snapshot.jpg"
-            attempted += 1
-            try:
-                raw = self.get(path, limit=6 * 1024 * 1024, timeout=min(6, remaining))
-                with Image.open(BytesIO(raw)) as source:
-                    if source.width * source.height > 16_000_000:
-                        raise EvidenceUnavailable("image_dimensions_limit")
-                    panel = source.convert("RGB")
-                    original_size = list(panel.size)
-                    box = ([math.floor(crop[0] * panel.width), math.floor(crop[1] * panel.height),
-                            math.ceil(crop[2] * panel.width), math.ceil(crop[3] * panel.height)] if crop else None)
-                    if box:
-                        panel = panel.crop(box)
-                    panel.thumbnail((self.options.max_width, self.options.max_height), Image.Resampling.LANCZOS)
-                polygon = ([(max(0, min(1, (x - crop[0]) / (crop[2] - crop[0]))),
-                             max(0, min(1, (y - crop[1]) / (crop[3] - crop[1]))))
-                            for x, y in self.roi_polygon] if crop and self.roi_polygon else None)
-                encoded = BytesIO()
-                panel.save(encoded, format="JPEG", quality=self.options.jpeg_quality)
-                jpeg = encoded.getvalue()
-                retained_bytes += len(jpeg)
-                records.append({**selection, "source_size": original_size, "crop_pixels": box,
-                                "panel_size": list(panel.size), "scoring_region": "roi_polygon" if polygon else "crop",
-                                **visual_metrics(panel, polygon), "_jpeg": jpeg})
-            except (EvidenceUnavailable, UnidentifiedImageError, OSError, Image.DecompressionBombError):
-                missing.append(timestamp)
+            lower, upper = ((end, end + self.options.post_window_seconds)
+                            if selection.get("sampling") == "post_window" else (start, end))
+            targets = ([requested] if intervals is None else recording_targets(
+                requested, intervals, lower, upper, self.options.recording_alignment_seconds))
+            obtained = False
+            for retry, timestamp in enumerate(targets):
+                if retry:
+                    remaining = deadline - time.monotonic()
+                if attempted >= request_limit or remaining <= 0:
+                    break
+                if intervals is not None and round(timestamp, 3) in used_requests:
+                    continue
+                used_requests.add(round(timestamp, 3))
+                attempted += 1
+                try:
+                    record = self.snapshot_record(selection, timestamp, crop, remaining)
+                    if intervals is not None:
+                        record.update(requested_timestamp=requested,
+                                      timestamp_adjustment_seconds=round(timestamp - requested, 6))
+                    records.append(record)
+                    retained_bytes += len(record["_jpeg"])
+                    obtained = True
+                    break
+                except (EvidenceUnavailable, UnidentifiedImageError, OSError, Image.DecompressionBombError):
+                    failed_requests.append(timestamp)
+            if not obtained:
+                missing.append(requested)
         if not records:
             raise EvidenceUnavailable("historical_frames_unavailable")
+        if failed_requests:
+            warnings.append("Some historical requests failed; any nearby recorded retries share the source-frame budget.")
+        if any(r.get("timestamp_adjustment_seconds") for r in records):
+            warnings.append("Some observations use nearby recorded times; read actual timestamps and requested_timestamp.")
+        return self.pack(candidate, selections, records, missing, attempted, crop, warnings, failed_requests)
+
+    def snapshot_record(self, selection, timestamp, crop, remaining):
+        # Crop native resolution before resizing, preserving small details.
+        path = "api/" + quote(self.camera, safe="") + f"/recordings/{timestamp:.3f}/snapshot.jpg"
+        raw = self.get(path, limit=6 * 1024 * 1024, timeout=min(6, remaining))
+        with Image.open(BytesIO(raw)) as source:
+            if source.width * source.height > 16_000_000:
+                raise EvidenceUnavailable("image_dimensions_limit")
+            panel = source.convert("RGB")
+            original_size = list(panel.size)
+            box = ([math.floor(crop[0] * panel.width), math.floor(crop[1] * panel.height),
+                    math.ceil(crop[2] * panel.width), math.ceil(crop[3] * panel.height)] if crop else None)
+            if box:
+                panel = panel.crop(box)
+            panel.thumbnail((self.options.max_width, self.options.max_height), Image.Resampling.LANCZOS)
+        polygon = ([(max(0, min(1, (x - crop[0]) / (crop[2] - crop[0]))),
+                     max(0, min(1, (y - crop[1]) / (crop[3] - crop[1]))))
+                    for x, y in self.roi_polygon] if crop and self.roi_polygon else None)
+        encoded = BytesIO()
+        panel.save(encoded, format="JPEG", quality=self.options.jpeg_quality)
+        return {**selection, "timestamp": timestamp, "source_size": original_size, "crop_pixels": box,
+                "panel_size": list(panel.size), "scoring_region": "roi_polygon" if polygon else "crop",
+                **visual_metrics(panel, polygon), "_jpeg": encoded.getvalue()}
+
+    def pack(self, candidate, selections, records, missing, attempted, crop, warnings, failed_requests):
+        start, end = candidate["started_at"], candidate["ended_at"]
         if missing:
             warnings.append("Some candidate historical frames are unavailable; coverage is incomplete.")
         tail_requested = sorted({s["timestamp"] for s in selections if s.get("sampling") == "tail_coverage"})
         tail_available = sorted({r["timestamp"] for r in records if r.get("sampling") == "tail_coverage"})
-        tail_available_keys = {round(t, 3) for t in tail_available}
+        tail_available_keys = {round(r.get("requested_timestamp", r["timestamp"]), 3)
+                               for r in records if r.get("sampling") == "tail_coverage"}
         tail_missing = [t for t in tail_requested if round(t, 3) not in tail_available_keys]
         selected = records if candidate.get("test") else select_diverse_frames(
             records, self.options.selected_frames, self.options, interval=(start, end))
         tail_selected = sorted({r["timestamp"] for r in selected if r.get("sampling") == "tail_coverage"})
+        object_tail_requested = sorted(s["timestamp"] for s in selections if s.get("sampling") == "object_tail")
+        object_tail_available_keys = {round(r.get("requested_timestamp", r["timestamp"]), 3)
+                                     for r in records if r.get("sampling") == "object_tail"}
+        object_tail_selected_keys = {round(r.get("requested_timestamp", r["timestamp"]), 3)
+                                    for r in selected if r.get("sampling") == "object_tail"}
+        if any(round(t, 3) not in object_tail_selected_keys for t in object_tail_requested):
+            warnings.append("Some configured object-tail observations are unavailable or were not selected; "
+                            "track disappearance does not establish removal or consumption.")
         if not candidate.get("test") and tail_requested and not tail_selected:
             warnings.append("No usable candidate-tail frame was selected; tail coverage is unavailable.")
         gaps = unobserved_intervals(start, end, [r["timestamp"] for r in selected])
@@ -551,6 +663,11 @@ class FrigateEvidence:
                 "sampling": {"planned": len(selections), "attempted": attempted, "available": len(records),
                              "selected": len(selected), "discarded": len(records) - len(selected)},
                 "coverage": {"candidate_interval": {"start": start, "end": end},
+                             "failed_request_timestamps": failed_requests,
+                             "object_tail_requested_timestamps": object_tail_requested,
+                             "object_tail_available_timestamps": sorted(r["timestamp"] for r in records if r.get("sampling") == "object_tail"),
+                             "object_tail_selected_timestamps": sorted(r["timestamp"] for r in selected if r.get("sampling") == "object_tail"),
+                             "object_tail_missing_timestamps": [t for t in object_tail_requested if round(t, 3) not in object_tail_available_keys],
                              "available_timestamps": sorted({r["timestamp"] for r in records}),
                              "selected_timestamps": sorted({r["timestamp"] for r in selected}),
                              "missing_timestamps": sorted(set(missing)),
@@ -566,7 +683,7 @@ class FrigateEvidence:
                              "tail_missing_timestamps": tail_missing,
                              "post_window_seconds": self.options.post_window_seconds,
                              "post_window_selected_timestamps": sorted(r["timestamp"] for r in selected if r.get("sampling") == "post_window"),
-                             "post_window_missing_timestamps": sorted(s["timestamp"] for s in selections if s.get("sampling") == "post_window" and s["timestamp"] not in {r["timestamp"] for r in records}),
+                             "post_window_missing_timestamps": sorted(s["timestamp"] for s in selections if s.get("sampling") == "post_window" and round(s["timestamp"], 3) not in {round(r.get("requested_timestamp", r["timestamp"]), 3) for r in records}),
                              "tail_available": bool(tail_selected) if not candidate.get("test") else None},
                 "crop_normalized": crop, "warnings": warnings,
                 "test": bool(candidate.get("test")),
