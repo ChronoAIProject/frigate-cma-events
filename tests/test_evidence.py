@@ -10,7 +10,7 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw, ImageFilter
 
 from evidence import (EvidenceOptions, EvidenceUnavailable, FrigateEvidence, sample_frames,
-                      select_diverse_frames, select_frames, visual_metrics)
+                      select_diverse_frames, select_frames, visual_metrics, recording_targets)
 from tests import test_service
 
 
@@ -18,6 +18,149 @@ class EvidenceTests(unittest.TestCase):
     setUp = test_service.ServiceTests.setUp
     tearDown = test_service.ServiceTests.tearDown
     bind = test_service.ServiceTests.bind
+
+    def test_recording_alignment_cannot_invent_history_or_cross_observation_windows(self):
+        intervals = [(90, 110), (120, 140), (160, 180)]
+        self.assertEqual(recording_targets(150, intervals, 100, 200, 3), [])
+        self.assertEqual(recording_targets(119, intervals, 100, 200, 3)[0], 120.25)
+        # Post-window observations must stay after the candidate, and ordinary
+        # candidate frames cannot escape its end to hide a missing tail.
+        self.assertEqual(recording_targets(119, intervals, 100, 119, 3), [])
+        for lo, hi, at in ((100, 110, 110), (120, 125, 120), (178, 180, 179.9)):
+            targets = recording_targets(at, intervals, lo, hi, 3)
+            self.assertLessEqual(len(targets), 2)
+            self.assertTrue(all(lo <= t <= hi and abs(t - at) <= 3 for t in targets))
+        # Millisecond URL rounding must not cross a recording or observation
+        # boundary, even when the unrounded requested time was covered.
+        self.assertEqual(recording_targets(109.9998, [(100, 109.9999)], 100, 109.9999, 0), [])
+        self.assertEqual(recording_targets(100.0004, [(100.0003, 110)], 100.0003, 110, 0), [])
+
+    def test_recording_index_alignment_and_decode_retry_preserve_actual_times_and_gaps(self):
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera",
+                                 options=EvidenceOptions(recording_alignment_seconds=3, sample_frames=6,
+                                                         selected_frames=3))
+        blob = BytesIO(); Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        selections = [{"timestamp": t, "phase": phase, "candidate_phase": phase,
+                       "tracked_objects": 0, "sampling": "interval_coverage"}
+                      for t, phase in ((100, "early"), (150, "middle"), (200, "late"))]
+        def get(path, **kwargs):
+            if "/recordings?" in path:
+                return json.dumps([{"start_time": a, "end_time": b}
+                                   for a, b in ((101, 120), (140, 160), (210, 230))])
+            timestamp = float(path.split("/recordings/")[1].split("/")[0])
+            if timestamp == 150:
+                raise EvidenceUnavailable("decode_failed")
+            return blob.getvalue()
+        candidate = {"candidate_id": "alignment-test", "subject": "test-camera", "started_at": 100, "ended_at": 300}
+        with patch.object(client, "object_events", return_value=[]), \
+                patch.object(client, "crop_bounds", return_value=None), \
+                patch("evidence.sample_frames", return_value=selections), \
+                patch.object(client, "get", side_effect=get) as fetch:
+            pack = client.composite(candidate)
+        self.assertEqual(pack["frame_timestamps"], [101.25, 149])
+        self.assertEqual([f["requested_timestamp"] for f in pack["frames"]], [100, 150])
+        self.assertEqual(pack["missing_timestamps"], [200])
+        self.assertEqual(pack["coverage"]["failed_request_timestamps"], [150])
+        self.assertEqual(pack["sampling"]["attempted"], 3)
+        self.assertEqual(sum("/snapshot.jpg" in c.args[0] for c in fetch.call_args_list), 3)
+        self.assertTrue(any("nearby recorded times" in w for w in pack["warnings"]))
+
+    def test_retries_share_source_limit_and_synthetic_validation_stays_one_frame(self):
+        blob = BytesIO(); Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        options = EvidenceOptions(recording_alignment_seconds=3, sample_frames=6, selected_frames=3)
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera", options=options)
+        candidate = {"candidate_id": "bounded-retries", "subject": "test-camera", "started_at": 100, "ended_at": 200}
+        for test in (False, True):
+            attempts = []
+            def get(path, **kwargs):
+                if "/recordings?" in path:
+                    return json.dumps([{"start_time": 90, "end_time": 210}])
+                attempts.append(path)
+                if len(attempts) % 2:
+                    raise EvidenceUnavailable("seek_failed")
+                return blob.getvalue()
+            with self.subTest(test=test), patch.object(client, "object_events", return_value=[]), \
+                    patch.object(client, "crop_bounds", return_value=None), \
+                    patch.object(client, "get", side_effect=get):
+                if test:
+                    with self.assertRaises(EvidenceUnavailable):
+                        client.composite({**candidate, "test": True})
+                    self.assertEqual(len(attempts), 1)
+                else:
+                    pack = client.composite(candidate)
+                    self.assertLessEqual(len(attempts), 6)
+                    self.assertEqual(pack["sampling"]["attempted"], len(attempts))
+                    self.assertLessEqual(len(pack["frames"]), 3)
+
+    def test_object_tail_is_reserved_before_lingering_and_cleared_table_frames(self):
+        options = EvidenceOptions(object_tail_frames=2, object_tail_seconds=60,
+                                  post_window_seconds=120, max_selected_gap_seconds=0)
+        tracks = [{"start": 100, "end": 1000, "snapshot": 500, "score": .9}]
+        frames = sample_frames(0, 3600, tracks, options)
+        tails = [f for f in frames if f["sampling"] == "object_tail"]
+        self.assertEqual(sorted(f["timestamp"] for f in tails), [940, 998])
+        self.assertEqual(len(frames), options.sample_frames)
+        records = [{**f, "quality": 1, "_signature": b"static-image"} for f in frames]
+        selected = select_diverse_frames(records, 12, options, interval=(0, 3600))
+        self.assertEqual(sorted(f["timestamp"] for f in selected if f["sampling"] == "object_tail"), [940, 998])
+        self.assertIn(3720, [f["timestamp"] for f in selected])
+        self.assertLessEqual(len(selected), 12)
+
+    def test_alignment_and_object_tail_settings_reject_invalid_budgets(self):
+        for values in ({"recording_alignment_seconds": -1}, {"recording_alignment_seconds": 11},
+                       {"object_tail_frames": True}, {"object_tail_frames": 4},
+                       {"object_tail_seconds": 0}, {"object_tail_seconds": float("nan")}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                EvidenceOptions(**values)
+
+    def test_invalid_or_unavailable_recording_index_falls_back_to_exact_history(self):
+        blob = BytesIO(); Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera",
+                                 options=EvidenceOptions(recording_alignment_seconds=3))
+        candidate = {"candidate_id": "index-fallback", "subject": "test-camera",
+                     "started_at": 100, "ended_at": 200, "test": True}
+        for index in (EvidenceUnavailable("upstream_unavailable"), "not json", '[{}]',
+                      '[{"start_time": 200, "end_time": 100}]'):
+            attempts = []
+            def get(path, **kwargs):
+                if "/recordings?" in path:
+                    if isinstance(index, Exception):
+                        raise index
+                    return index
+                attempts.append(path)
+                return blob.getvalue()
+            with self.subTest(index=index), patch.object(client, "crop_bounds", return_value=None), \
+                    patch.object(client, "get", side_effect=get):
+                result = client.composite(candidate)
+            self.assertEqual(len(attempts), 1)
+            self.assertIn("/198.000/", attempts[0])
+            self.assertEqual(result["frame_timestamps"], [198])
+            self.assertTrue(any("exact historical requests only" in w for w in result["warnings"]))
+
+    def test_aligned_tail_and_post_window_report_requested_coverage_and_missing_object_tail(self):
+        blob = BytesIO(); Image.new("RGB", (320, 180), "white").save(blob, "JPEG")
+        client = FrigateEvidence("https://proxy.example/service", "key", "test-camera",
+                                 options=EvidenceOptions(recording_alignment_seconds=3, post_window_seconds=120))
+        candidate = {"candidate_id": "tail-alignment", "subject": "test-camera", "started_at": 100, "ended_at": 200}
+        selections = [{"timestamp": t, "phase": "late", "candidate_phase": "late",
+                       "tracked_objects": 0, "sampling": source}
+                      for t, source in ((180, "object_tail"), (200, "tail_coverage"), (320, "post_window"))]
+        def get(path, **kwargs):
+            if "/recordings?" in path:
+                return '[{"start_time": 190, "end_time": 199}, {"start_time": 318, "end_time": 319}]'
+            return blob.getvalue()
+        with patch.object(client, "object_events", return_value=[]), \
+                patch.object(client, "crop_bounds", return_value=None), \
+                patch("evidence.sample_frames", return_value=selections), patch.object(client, "get", side_effect=get):
+            result = client.composite(candidate)
+        coverage = result["coverage"]
+        self.assertEqual(coverage["tail_selected_timestamps"], [198.75])
+        self.assertEqual(coverage["post_window_selected_timestamps"], [318.75])
+        self.assertEqual(coverage["tail_missing_timestamps"], [])
+        self.assertEqual(coverage["post_window_missing_timestamps"], [])
+        self.assertEqual(coverage["object_tail_missing_timestamps"], [180])
+        self.assertTrue(any("object-tail observations are unavailable" in w for w in result["warnings"]))
+
     def enable(self):
         state = self.client.app.state.worker
         state.config = replace(state.config, evidence_token="e" * 48, evidence_service="synthetic-evidence")
