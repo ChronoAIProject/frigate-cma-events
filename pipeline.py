@@ -7,6 +7,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from evidence import EvidenceOptions
+from scenarios import validate_analysis
 
 
 def number(value):
@@ -112,7 +113,9 @@ class Pipeline:
         if len(raw.encode()) > 65536:
             raise ValueError("Pipeline configuration exceeds 64 KiB")
         d = json.loads(raw)
-        keys(d, ("version", "name", "source", "window", "activity", "requirements", "limits", "output", "evidence"))
+        keys(d, ("version", "name", "source", "window", "activity", "requirements", "limits", "output", "evidence", "analysis"))
+        if "analysis" in d:
+            validate_analysis(d["analysis"])
         if (type(d.get("version")) is not int or d["version"] != 1 or not isinstance(d.get("name"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", d["name"])):
             raise ValueError("Pipeline requires version 1 and a stable name")
@@ -213,6 +216,7 @@ class Pipeline:
             raise ValueError("A compatibility ID prefix requires a fixed subject")
         out.setdefault("aliases", {})
         reserved = {"schema", "candidate_id", "subject", "decision", "event_ids", "started_at", "ended_at", "activity_seconds", "event_count", "conditions", "images", "evidence_budget", "cautions", "test", "validation_mode", "status", "accepted", "result", "records", "metadata_truncated", "monitoring_rule", "evidence", "result_callback"}
+        reserved.add("analysis")
         if not isinstance(out["aliases"], dict) or len(out["aliases"]) > 16:
             raise ValueError("Invalid output aliases")
         for alias, field in out["aliases"].items():
@@ -270,7 +274,7 @@ class Pipeline:
 
     def state_document(self):
         # Media sampling settings may change without invalidating aggregation.
-        return {k: deepcopy(v) for k, v in self.spec.items() if k != "evidence"}
+        return {k: deepcopy(v) for k, v in self.spec.items() if k not in {"evidence", "analysis"}}
 
     def aliases(self, payload):
         missing = object()

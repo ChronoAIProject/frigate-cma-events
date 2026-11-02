@@ -1,6 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let token = '', rules = [], selected = null, cameras = [], settings = {}, revisions = [];
+let templates = [], importedTemplate = null, analysisDirty = false;
 let language = /^zh\b/i.test(navigator.language) ? 'zh' : 'en', notice = null, lastHistory = null, lastStatus = null;
 const base = new URL('./', window.location.href);
 const t = (key, values) => MonitorI18n.t(language, key, values);
@@ -45,6 +46,7 @@ function loadEditor(rule) {
   $('label').value = rule?.label || ''; $('enabled').checked = rule?.enabled || false; $('delivery').checked = rule?.delivery_enabled || false;
   $('delivery').disabled = !settings.cma_configured;
   $('policy').value = rule ? JSON.stringify(rule.pipeline, null, 2) : '';
+  loadAnalysis(rule?.pipeline);
   $('archive').hidden = !rule || rule.archived; $('duplicate').hidden = !rule;
   $('save').disabled = !!rule?.archived; $('history').hidden = !rule;
   const p = rule?.pipeline;
@@ -100,6 +102,7 @@ function renderCameras() {
 async function refresh() {
   const [meta, listing, status] = await Promise.all([api('api/management'), api('api/rules'), api('api/status')]);
   settings = meta; rules = listing.rules; lastStatus = status; $('auth').hidden = true; renderMetrics();
+  templates = (await api('api/scenarios')).templates; renderScenarios();
   renderRules();
   try { cameras = (await api('api/cameras')).cameras; } catch (e) { cameras = []; message('cameraUnavailable', true); }
   renderCameras();
@@ -114,7 +117,7 @@ $('camera').addEventListener('change', updateZones);
 $('connect').addEventListener('click', run(async () => { token = $('token').value; $('token').value = ''; await refresh(); message('connected'); }));
 $('refresh').addEventListener('click', run(refresh));
 $('new').addEventListener('click', () => { selected = null; renderRules(); loadEditor(null); });
-$('duplicate').addEventListener('click', () => { const policy = $('policy').value, label = $('label').value; selected = null; renderRules(); loadEditor(null); $('policy').value = policy; $('label').value = label + ' · ' + t('copySuffix'); });
+$('duplicate').addEventListener('click', () => { const policy = $('policy').value, label = $('label').value; selected = null; renderRules(); loadEditor(null); $('policy').value = policy; try { loadAnalysis(JSON.parse(policy)); } catch {} $('label').value = label + ' · ' + t('copySuffix'); });
 $('generate').addEventListener('click', run(() => {
   const camera = $('camera').value; if (!camera) throw Error('chooseCameraFirst');
   if ($('policy').value.trim() && !window.confirm(t('generateConfirm'))) return;
@@ -127,11 +130,18 @@ $('generate').addEventListener('click', run(() => {
     activity: {name: 'activity', match, minimum_seconds: Number($('duration').value)},
     limits: {cooldown_seconds: Number($('cooldown').value), max_per_day: Number($('daily').value), timezone: $('timezone').value},
     evidence: $('evidence').checked ? {adapter: 'frigate', crop_zone: $('crop').value, labels} : {adapter: 'none'}};
+  try { const current = JSON.parse($('policy').value); if (current.analysis) policy.analysis = current.analysis; } catch {}
   $('policy').value = JSON.stringify(policy, null, 2); message('generated');
 }));
 $('editor').addEventListener('submit', run(async event => {
   event.preventDefault();
   let policy; try { policy = JSON.parse($('policy').value); } catch { throw Error('invalidJson'); }
+  if (analysisDirty) {
+    const instructions = $('analysis-instructions').value.trim();
+    let context; try { context = JSON.parse($('analysis-context').value || '{}'); } catch { throw Error('invalidJson'); }
+    if (instructions) policy.analysis = {...(policy.analysis || {}), version: 1, instructions, context};
+    else delete policy.analysis;
+  }
   const value = {label: $('label').value, pipeline: policy, enabled: $('enabled').checked, delivery_enabled: $('delivery').checked};
   if (selected) await api('api/rules/' + selected.id, 'PUT', value, selected.revision);
   else { value.id = $('identity').value; selected = await api('api/rules', 'POST', value); }
@@ -142,4 +152,61 @@ $('archive').addEventListener('click', run(async () => {
   await api('api/rules/' + selected.id, 'DELETE', undefined, selected.revision); await refresh(); message('archiveDone');
 }));
 $('history-version').addEventListener('change', run(() => showHistory(Number($('history-version').value))));
+function loadAnalysis(policy) {
+  $('analysis-instructions').value = policy?.analysis?.instructions || '';
+  $('analysis-context').value = JSON.stringify(policy?.analysis?.context || {}, null, 2); analysisDirty = false;
+}
+function scenarioTemplate() { return $('scenario').value === '__imported' ? importedTemplate : templates.find(s => s.id === $('scenario').value); }
+function renderScenarios() {
+  const current = $('scenario').value;
+  $('scenario').replaceChildren(...templates.map(s => option(s.id, s.title)));
+  if (importedTemplate) $('scenario').append(option('__imported', importedTemplate.title));
+  if ([...$('scenario').options].some(o => o.value === current)) $('scenario').value = current;
+  renderParameters();
+}
+function renderParameters() {
+  $('scenario-parameters').replaceChildren(); const template = scenarioTemplate(); if (!template) return;
+  for (const [name, spec] of Object.entries(template.parameters)) {
+    const label = document.createElement('label'); label.append(document.createTextNode(spec.title));
+    const field = document.createElement(spec.type === 'object' ? 'textarea' : 'input'); field.dataset.parameter = name; field.dataset.type = spec.type;
+    if (spec.type === 'boolean') { field.type = 'checkbox'; field.checked = spec.default || false; }
+    else { if (spec.type === 'number' || spec.type === 'integer') { field.type = 'number'; field.step = spec.type === 'integer' ? '1' : 'any'; }
+      field.value = spec.type === 'object' ? JSON.stringify(spec.default || {}, null, 2) : spec.default ?? ''; }
+    label.append(field); $('scenario-parameters').append(label);
+  }
+}
+$('scenario').addEventListener('change', renderParameters);
+$('scenario-file').addEventListener('change', run(async () => {
+  const file = $('scenario-file').files[0]; if (!file) return;
+  if (file.size > 49152) throw Error('invalid_scenario');
+  let value; try { value = JSON.parse(await file.text()); } catch { throw Error('invalid_scenario'); }
+  if (!value || value.schema !== 'video-event-monitor.scenario.v1' || typeof value.title !== 'string' || !value.parameters || typeof value.parameters !== 'object' || Array.isArray(value.parameters) || Object.keys(value.parameters).length > 32 || Object.values(value.parameters).some(p => !p || typeof p.title !== 'string' || !['string', 'integer', 'number', 'boolean', 'object'].includes(p.type))) throw Error('invalid_scenario');
+  importedTemplate = value; renderScenarios(); $('scenario').value = '__imported'; renderParameters(); message('scenarioImported');
+}));
+$('render-scenario').addEventListener('click', run(async () => {
+  const template = scenarioTemplate(); if (!template) throw Error('invalid_scenario');
+  if ($('policy').value.trim() && !window.confirm(t('generateConfirm'))) return;
+  const parameters = {};
+  for (const field of $('scenario-parameters').querySelectorAll('[data-parameter]')) {
+    const kind = field.dataset.type;
+    try { parameters[field.dataset.parameter] = kind === 'object' ? JSON.parse(field.value) : kind === 'boolean' ? field.checked : ['integer', 'number'].includes(kind) ? Number(field.value) : field.value; } catch { throw Error('invalidJson'); }
+  }
+  const value = await api('api/scenarios/render', 'POST', {template, parameters});
+  $('policy').value = JSON.stringify(value.pipeline, null, 2); loadAnalysis(value.pipeline); message('generated');
+}));
+$('download-scenario').addEventListener('click', () => {
+  const template = scenarioTemplate(); if (!template) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(template, null, 2)], {type: 'application/json'}));
+  const link = document.createElement('a'); link.href = url; link.download = 'scenario-template.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('policy').addEventListener('input', () => { try { loadAnalysis(JSON.parse($('policy').value)); } catch {} });
+for (const id of ['analysis-instructions', 'analysis-context']) $(id).addEventListener('input', () => {
+  analysisDirty = true;
+  try {
+    const policy = JSON.parse($('policy').value), instructions = $('analysis-instructions').value.trim();
+    if (instructions) policy.analysis = {...(policy.analysis || {}), version: 1, instructions, context: JSON.parse($('analysis-context').value || '{}')};
+    else delete policy.analysis;
+    $('policy').value = JSON.stringify(policy, null, 2);
+  } catch {}
+});
 applyLanguage(); run(refresh)();

@@ -79,7 +79,7 @@ wheels = [
 
 [[package]]
 name = "video-event-monitor"
-version = "0.3.4"
+version = "0.4.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },

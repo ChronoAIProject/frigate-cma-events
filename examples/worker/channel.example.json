@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "record_id": "${CHANNEL_RECORD_ID}",
+  "name": "${WORKER_NAME}",
+  "profile": {
+    "schema_version": 1,
+    "metadata": {
+      "name": "${WORKER_NAME}",
+      "description": "Shared revision-owned scenario analysis",
+      "owner": {
+        "kind": "human",
+        "subject": "${CMA_OWNER_ID}"
+      },
+      "provider": "cma_codex"
+    },
+    "model": {
+      "access": "managed",
+      "service": "${MODEL_SERVICE}",
+      "api_type": "responses",
+      "model": "${MODEL_NAME}",
+      "thinking_effort": "${MODEL_THINKING_EFFORT}"
+    },
+    "permission": {
+      "action_mode": "autonomous",
+      "service_scope": [
+        "${MONITOR_SERVICE}"
+      ]
+    },
+    "context": {
+      "skills": [],
+      "mcp_servers": [],
+      "system_prompt": "${WORKER_PROMPT}"
+    },
+    "environment": {
+      "size": {
+        "cpu_cores": 1,
+        "memory_gib": 2
+      },
+      "workspace": {
+        "type": "directory",
+        "name": "video-event-analysis"
+      }
+    }
+  },
+  "provider": {
+    "slug": "cma_codex"
+  },
+  "sources": [
+    {
+      "type": "custom",
+      "auth": {
+        "type": "hmac",
+        "key_id": "${CMA_HMAC_KEY_ID}"
+      }
+    }
+  ],
+  "partition": {
+    "version": 1,
+    "key": "per_event"
+  },
+  "reply": {
+    "auto_final": true,
+    "ack_after_ms": 2000,
+    "sinks": [
+      {
+        "type": "sync"
+      }
+    ]
+  },
+  "credentials": {
+    "agent_key": "SET_DISTINCT_NYXID_CHANNEL_KEY",
+    "hmac_secrets": [
+      {
+        "key_id": "${CMA_HMAC_KEY_ID}",
+        "secret": "SET_BASE64_HMAC_SECRET"
+      }
+    ]
+  }
+}

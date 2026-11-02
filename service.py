@@ -386,6 +386,8 @@ class State:
                   if self.config.rule_id else "")
         if self.config.rule_id:
             payload = {**payload, "monitoring_rule": {"id": self.config.rule_id, "revision": self.config.rule_revision}}
+        if "analysis" in self.pipeline.spec:
+            payload = {**payload, "analysis": self.pipeline.spec["analysis"]}
         event = {
             "specversion": "1.0",
             "id": cma_event_id(self.config.event_source, candidate_id, event_type),
@@ -444,7 +446,7 @@ class State:
                 method="POST",
                 headers={
                     "Content-Type": "application/cloudevents+json",
-                    "User-Agent": "video-event-monitor/0.3.4",
+                    "User-Agent": "video-event-monitor/0.4.0",
                     "webhook-id": webhook_id,
                     "webhook-timestamp": timestamp,
                     "webhook-signature": cma_signature(self.config.cma_hmac_secret, webhook_id, timestamp, row["body"]),
@@ -559,7 +561,7 @@ def create_app(config=None):
                 pass
             app.state.monitor.close()
 
-    app = FastAPI(title="Video Event Monitor", version="0.3.4", lifespan=lifespan,
+    app = FastAPI(title="Video Event Monitor", version="0.4.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -617,7 +619,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.3.4", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.4.0", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")

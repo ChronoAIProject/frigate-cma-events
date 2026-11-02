@@ -291,3 +291,5 @@ remain under CMA retention. Operator health reports cleanup errors and counts.
 Inventory scans filter out deleted history and drain up to 50 resources per idle
 state per run; `scan_limited` reports when another page remains for later runs.
 This is disabled by default and does not authorize the worker to manage Agents.
+
+See [reusable scenarios and live analysis edits](docs/scenarios.md) for shared workers, third-party templates and multiple workflows without per-analysis image releases.
