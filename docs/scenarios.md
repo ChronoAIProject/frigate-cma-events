@@ -115,7 +115,7 @@ Settings contain `owner_id`, `model_service`, `model`, `services` (including the
 Monitor's worker-facing service and only required destinations), plus optional
 `name`, `thinking_effort` and `hmac_key_id`. The output deliberately contains
 credential placeholders. Create a distinct scoped channel binding key, fill it
-and the HMAC secret privately, then use the [CMA creation procedure](../examples/dining/README.md#4-create-the-profile-managed-cma-channel).
+and the HMAC secret privately, then use the [CMA creation procedure](../examples/dining/README.md#4-create-a-profile-managed-per-event-channel).
 Keep `per_event` partitioning and the fixed generic system prompt. Apply the
 returned event URL/signing configuration to HA and restart once; configure
 scoped idle cleanup using the resulting native workspace/profile identities.
