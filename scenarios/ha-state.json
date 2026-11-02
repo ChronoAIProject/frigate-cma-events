@@ -1,0 +1,102 @@
+{
+  "schema": "video-event-monitor.scenario.v1",
+  "id": "ha-state",
+  "version": "1.0.0",
+  "title": "HA events / 家庭事件",
+  "parameters": {
+    "source": {
+      "type": "string",
+      "title": "Event source URI"
+    },
+    "subject": {
+      "type": "string",
+      "title": "Entity selector",
+      "default": "*"
+    },
+    "timezone": {
+      "type": "string",
+      "title": "Time zone",
+      "default": "UTC"
+    },
+    "workflow": {
+      "type": "object",
+      "title": "Private workflow settings (service names and destination IDs; no credentials)",
+      "default": {}
+    }
+  },
+  "pipeline": {
+    "version": 1,
+    "name": "ha-state-activity",
+    "source": {
+      "adapter": "cloudevents",
+      "source": {
+        "$param": "source"
+      },
+      "subject": {
+        "$param": "subject"
+      },
+      "types": [
+        "homeassistant.state_changed"
+      ],
+      "mode": "point",
+      "filter": {
+        "field": "data.new_state.state",
+        "op": "eq",
+        "value": "on"
+      },
+      "fields": {
+        "attributes": {
+          "state": "data.new_state.state",
+          "entity_id": "data.entity_id"
+        }
+      },
+      "health": {
+        "mode": "observed_events"
+      }
+    },
+    "window": {
+      "merge_seconds": 60,
+      "settle_seconds": 10,
+      "maximum_seconds": 3600
+    },
+    "activity": {
+      "name": "repeated_activity",
+      "minimum_events": 3
+    },
+    "limits": {
+      "cooldown_seconds": 300,
+      "max_per_day": 100,
+      "timezone": {
+        "$param": "timezone"
+      }
+    },
+    "output": {
+      "event_type": "home.activity_candidate",
+      "schema": "home-activity-candidate.v1",
+      "cautions": [
+        "Only received on-transition events are summarized; this does not establish occupancy or absence."
+      ],
+      "result_statuses": [
+        "processed",
+        "pending",
+        "integration_test"
+      ],
+      "result_fields": [
+        "reference",
+        "uncertainty"
+      ]
+    },
+    "evidence": {
+      "adapter": "none"
+    },
+    "analysis": {
+      "version": 1,
+      "instructions": "Summarize only the received state-transition records and their actual event times. This is metadata-only: never request images. Observed on transitions do not establish continuous occupancy, absence, identity or safety. No device actions, external writes or notifications. Return a concise summary in result_callback.reference and limitations in uncertainty, status processed; use integration_test for an explicit validation. Missing required metadata means pending.",
+      "context": {
+        "config": {
+          "$param": "workflow"
+        }
+      }
+    }
+  }
+}

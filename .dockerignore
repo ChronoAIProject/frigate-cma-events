@@ -19,3 +19,6 @@
 !management.py
 !ui/
 !ui/**
+!scenarios.py
+!scenarios/
+!scenarios/*.json

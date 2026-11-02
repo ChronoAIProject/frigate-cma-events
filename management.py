@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from evidence import EvidenceUnavailable, FrigateEvidence
 from monitoring import Problem
+from scenarios import catalog, render_template
 
 UI = Path(__file__).parent / 'ui'
 
@@ -99,6 +100,24 @@ def install_management(app, authorize, body, ingress, cma_event_id):
     def rules(request: Request):
         mon = manager(request)
         return {'rules': mon.list()}
+
+    @app.get('/api/scenarios')
+    def scenarios(request: Request):
+        manager(request)
+        return {'templates': catalog()}
+
+    @app.post('/api/scenarios/render')
+    async def render_scenario(request: Request):
+        manager(request)
+        value = await body(request)
+        try:
+            if set(value) - {'id', 'template', 'parameters'} or ('id' in value) == ('template' in value):
+                raise ValueError()
+            template = (next(t for t in catalog() if t['id'] == value['id'])
+                        if 'id' in value else value['template'])
+            return {'pipeline': render_template(template, value.get('parameters', {}))}
+        except (ValueError, TypeError, KeyError, StopIteration, RecursionError):
+            raise Problem(400, 'invalid_scenario') from None
 
     @app.post('/api/rules', status_code=201)
     async def create(request: Request):

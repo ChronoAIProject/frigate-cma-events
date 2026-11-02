@@ -1,0 +1,123 @@
+{
+  "schema": "video-event-monitor.scenario.v1",
+  "id": "driveway",
+  "version": "1.0.0",
+  "title": "Driveway / 车辆活动",
+  "parameters": {
+    "source": {
+      "type": "string",
+      "title": "Event source URI",
+      "default": "urn:frigate:home"
+    },
+    "camera": {
+      "type": "string",
+      "title": "Camera"
+    },
+    "timezone": {
+      "type": "string",
+      "title": "Time zone",
+      "default": "UTC"
+    },
+    "zone": {
+      "type": "string",
+      "title": "Driveway activity zone"
+    },
+    "workflow": {
+      "type": "object",
+      "title": "Private workflow settings (service names and destination IDs; no credentials)",
+      "default": {}
+    }
+  },
+  "pipeline": {
+    "version": 1,
+    "name": "vehicle-visit",
+    "source": {
+      "adapter": "frigate_reviews",
+      "source": {
+        "$param": "source"
+      },
+      "subject": {
+        "$param": "camera"
+      }
+    },
+    "window": {
+      "merge_seconds": 90,
+      "settle_seconds": 20,
+      "maximum_seconds": 3600
+    },
+    "activity": {
+      "name": "vehicle_presence",
+      "minimum_seconds": 10,
+      "match": {
+        "all": [
+          {
+            "field": "labels",
+            "op": "contains_any",
+            "value": [
+              "car",
+              "motorcycle"
+            ]
+          },
+          {
+            "field": "zones",
+            "op": "contains_any",
+            "value": [
+              {
+                "$param": "zone"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "limits": {
+      "cooldown_seconds": 120,
+      "max_per_day": 50,
+      "timezone": {
+        "$param": "timezone"
+      }
+    },
+    "output": {
+      "event_type": "security.vehicle_visit_candidate",
+      "schema": "vehicle-visit-candidate.v1",
+      "cautions": [
+        "Detected activity is not proof of an arrival, departure, visitor identity or authorization."
+      ],
+      "budget": {
+        "max_model_turns": 1,
+        "max_images": 2,
+        "max_source_frames": 18,
+        "max_selected_frames": 6
+      }
+    },
+    "evidence": {
+      "adapter": "frigate",
+      "crop_zone": {
+        "$param": "zone"
+      },
+      "labels": [
+        "car",
+        "motorcycle"
+      ],
+      "options": {
+        "sample_frames": 18,
+        "selected_frames": 6,
+        "density_weight": 0.2,
+        "quality_weight": 0.5,
+        "novelty_weight": 0.3
+      },
+      "cautions": [
+        "Different views can show the same vehicle. Do not infer identity or trigger device controls."
+      ]
+    },
+    "analysis": {
+      "version": 1,
+      "instructions": "Summarize visible vehicle activity using the provided bounded historical evidence. Distinguish observations from possible arrivals/departures; report uncertainty, frame IDs and actual times. Do not identify people, vehicle owners or authorization. No device actions or external notifications. Return a concise summary in result_callback.reference and limitations in uncertainty, status processed; use integration_test for an explicit validation, or pending if evidence is missing. Do not write a business destination unless separately configured in this rule.",
+      "context": {
+        "config": {
+          "$param": "workflow"
+        }
+      }
+    }
+  }
+}

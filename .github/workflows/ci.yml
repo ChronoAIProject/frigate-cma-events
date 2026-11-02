@@ -23,7 +23,9 @@ jobs:
           node --check ui/i18n.js
           node --test tests/test_ui.cjs
       - name: Verify runtime sources are packaged
-        run: docker build --tag pipeline-core-test .
+        run: |
+          docker build --tag pipeline-core-test .
+          docker run --rm pipeline-core-test /app/.venv/bin/python -c 'from scenarios import catalog, render_template; templates = catalog(); assert len(templates) == 3; render_template(next(t for t in templates if t["id"] == "ha-state"), {"source":"urn:example:smoke"})'
   publish:
     if: github.event_name != 'pull_request'
     needs: test

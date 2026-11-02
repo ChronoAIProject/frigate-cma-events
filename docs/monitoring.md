@@ -162,3 +162,5 @@ establish an Ingress identity. HA's admin-only panel gates ingress sessions.
 State-changing ingress requests additionally require
 `X-Monitoring-Request: 1`; CORS is not enabled. No API token is embedded in the
 page. Standalone deployments leave `HA_INGRESS=false`.
+
+See [reusable scenarios and live analysis edits](scenarios.md) for shared workers, third-party templates and multiple workflows without per-analysis image releases.

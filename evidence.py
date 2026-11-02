@@ -395,7 +395,7 @@ class FrigateEvidence:
         self.opener = build_opener(NoRedirect)
 
     def get(self, path, limit=2 * 1024 * 1024, timeout=15):
-        headers = {"User-Agent": "video-event-monitor/0.3.4"}
+        headers = {"User-Agent": "video-event-monitor/0.4.0"}
         if self.key:
             headers["Authorization"] = "Bearer " + self.key
         request = Request(self.url + "/" + path, headers=headers)

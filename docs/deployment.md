@@ -88,12 +88,12 @@ permissions. Adding a rule does not automatically create or retune a worker.
 
 | Configuration | Source of truth | How to apply |
 | --- | --- | --- |
-| Filtering, cameras, windows, evidence budgets, output/result contract | Monitor's persistent rule registry | HA page or owner rule API; each edit creates a revision |
+| Filtering, cameras, windows, evidence budgets, analysis plans, output/result contract | Monitor's persistent rule registry | HA page or owner rule API; each edit creates a revision |
 | `pipeline_config` / `PIPELINE_CONFIG_*` | First-start bootstrap only | Imported once as `default` v1; later edits use the registry |
 | Frigate URL, CMA URL/HMAC, tokens, cleanup pins, timers | Private HA add-on options | Save and restart the Monitor |
 | MQTT/HA subscriptions, routes and destination credentials | Private Event Relay options | Save and restart the Relay |
 | Local HTTP targets and injected credentials | NyxID service records plus node options/local credential store | Apply the matching server route and node configuration |
-| Model, worker prompt, services, partition and channel source | CMA profile/channel definition | Use CMA management APIs; independently read back the result |
+| Model, shared worker protocol, services, partition and channel source | CMA profile/channel definition | Use CMA management APIs; independently read back the result |
 | Summary instructions, bot and fixed chat | NyxID notification automation | Configure/enable the receiver and verify native delivery |
 | Raw recording retention and disk/NAS storage | Frigate and HA storage configuration | Apply through those components |
 
@@ -102,7 +102,9 @@ above. There is no single deploy command that synchronizes HA, CMA and NyxID.
 `examples/dining/render.py` produces a private cloud app/worker/channel bundle;
 it does not install HA add-ons or publish its outputs to platform APIs.
 
-`examples/dining/worker-prompt.md` is a deployment template. Its text is copied
+With the shared scenario worker, analysis instructions and local settings live in each rule’s `analysis` plan and apply through rule revisions. Third-party templates can be imported without an image release. See [portable scenarios](scenarios.md).
+
+For legacy installations, `examples/dining/worker-prompt.md` is a deployment template. Its text is copied
 into the private CMA profile. Editing or merging that file does not change an
 existing worker until the profile/channel configuration is applied.
 
@@ -110,9 +112,9 @@ existing worker until the profile/channel configuration is applied.
 
 | Change | Required application | HA image upgrade? |
 | --- | --- | --- |
-| Rule or evidence parameters | Save a versioned rule; verify decisions during a quiet period | No |
+| Rule/evidence parameters, scenario analysis instructions/settings | Save a versioned rule; verify decisions during a quiet period | No |
 | Monitor connection, token, timer or cleanup setting | Save HA options and restart Monitor | No |
-| Worker instructions/model/grants | Apply CMA profile/channel, inspect refusals and read back | No; a new channel URL/HMAC or cleanup identity also requires HA option changes/restart |
+| Shared worker protocol/model/grants | Apply CMA profile/channel, inspect refusals and read back | No; a new channel URL/HMAC or cleanup identity also requires HA option changes/restart |
 | Completion notification | Configure receiver and worker hook/grants; test one replay and deduplication | No core change required for the existing dining hook |
 | Monitor aggregation, evidence, API or UI code | Publish core image; update HA pin; publish a new add-on version; upgrade installed HA add-on | Yes |
 | HA startup wrapper or add-on schema | Publish a new HA add-on version and upgrade it | Yes |
