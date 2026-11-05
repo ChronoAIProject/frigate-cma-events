@@ -182,6 +182,10 @@ overlapping request returns `202 pending` with `Retry-After: 5`; retry the same
 resource at most six times after five seconds, including interrupted downloads.
 Cached retrieval does not resample.
 
+Optional [overview and native region views](docs/pipeline.md#overview-and-native-region-views)
+keep one overview plus up to two pages of object closeups within three images.
+The worker locates regions; the Monitor crops original pixels without model inference.
+
 Labels, crop zone, cautions and `EvidenceOptions` weights/thresholds are set in
 `evidence` configuration. `EVIDENCE_*` deployment overrides remain supported;
 see the [guide](docs/pipeline.md). Evidence settings do not change the aggregation digest; a managed edit still

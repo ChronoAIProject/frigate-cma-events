@@ -270,3 +270,52 @@ backups and existing candidate IDs instead of keeping a live rollback service.
 Worker-facing, delegated node and operator entries remain part of the active
 auth path. Verify actual deletion/credential revocation; a stopped app or an
 accepted asynchronous retirement is not completed resource removal.
+
+
+## Overview and native region views
+
+Set `evidence.options.detail_regions` to an integer 1..8 to enable this opt-in
+mode (0 preserves existing composite pages). With 8 regions, the existing
+three-image budget becomes one labeled overview contact sheet plus at most two
+pages of four native crops. At most 12 selected source frames remain available.
+Broad interval observations take precedence over nearby bursts in this mode.
+The sampling/time/retained-memory ceilings and missing-coverage reporting remain.
+
+1. `GET` the event's exact evidence service/path. A `region_views` descriptor
+   advertises the bounded crop protocol. The overview identifies each frame;
+   `frames[].overview_pixels` locates its content cell in the contact sheet.
+2. The analysis worker locates visible objects in the overview, then `POST`s one
+   batch to that same evidence endpoint:
+
+   ```json
+   {"regions":[{"frame_id":"F03","box":[0.2,0.3,0.4,0.5]}]}
+   ```
+
+   Boxes are normalized `[left,top,right,bottom]` in the individual frame's crop,
+   excluding its label, padding and other cells. Each box must be finite, within
+   `[0,1]`, at least 8 native pixels per side and no more than 35% of the frame's
+   crop area. Unknown frames, arbitrary timestamps/URLs, duplicates, unknown
+   fields and out-of-bounds coordinates are rejected. The worker should choose
+   tight views of actual objects, not fill the quota with background.
+3. The service crops the retained original-resolution JPEG pixels **before**
+   overview resizing, then bounds each detail by the configured panel dimensions
+   without upscaling. It returns `regions[]` with region/frame IDs, actual time,
+   source pixel box, native crop size and output size. Up to four regions form
+   each detail page. No additional source requests, model calls or live images
+   are involved. This preserves spatial detail but cannot restore video/JPEG
+   compression or reveal occluded contents.
+
+One overview and its detail pages share the advertised total `max_images`.
+The first successful crop batch is immutable: an identical retry returns the
+cached response; a different batch returns 409. An evicted/restarted evidence
+session returns 410; report pending instead of re-extracting. The global single
+extraction lock/four-session cache is shared across rule revisions. Retained
+source bytes count toward the local sampling memory ceiling and are never
+included in public JSON. Synthetic validation keeps its original one-frame,
+one-image budget and does not enable detail requests.
+
+This protocol needs core 0.5.0 and a workflow that follows `region_views`.
+Existing modes/workflows remain compatible. After installation, toggling this
+option or changing object-selection instructions uses ordinary live rule edits.
+The Dining template exposes `detail-regions` (default 0); region IDs represent
+views, not additional dishes or cross-frame object identities.

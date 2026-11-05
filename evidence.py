@@ -16,6 +16,20 @@ class EvidenceUnavailable(Exception):
     pass
 
 
+class EvidencePack(dict):
+    """Public JSON plus bounded, process-local pixels for one detail batch.
+
+    Attributes are deliberately not mapping keys: source images must never be
+    serialized into the overview response or event context.
+    """
+
+    def __init__(self, public, sources):
+        super().__init__(public)
+        self.sources = sources
+        self.detail_request = None
+        self.detail_response = None
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -44,12 +58,13 @@ class EvidenceOptions:
     recording_alignment_seconds: float = 0
     object_tail_frames: int = 0
     object_tail_seconds: float = 60
+    detail_regions: int = 0
 
     def __post_init__(self):
         if any(not finite(getattr(self, name)) for name in self.__dataclass_fields__):
             raise ValueError("Evidence options require finite numeric values")
         if any(type(getattr(self, name)) is not int for name in (
-                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames", "tail_coverage_frames", "object_tail_frames")):
+                "max_width", "max_height", "jpeg_quality", "sample_frames", "selected_frames", "tail_coverage_frames", "object_tail_frames", "detail_regions")):
             raise ValueError("Evidence dimensions, quality and frame counts require integers")
         if not 0 <= self.crop_padding <= 0.15:
             raise ValueError("EVIDENCE_CROP_PADDING must be between 0 and 0.15")
@@ -69,6 +84,8 @@ class EvidenceOptions:
             raise ValueError("Recording alignment must be between 0 and 10 seconds")
         if not 0 <= self.object_tail_frames <= 3 or not 1 <= self.object_tail_seconds <= 300:
             raise ValueError("Object-tail observations require 0..3 frames and a 1..300 second window")
+        if not 0 <= self.detail_regions <= 8:
+            raise ValueError("Detail regions must be between 0 and 8")
         if not 2 <= self.burst_seconds <= 60 or not 5 <= self.sampling_seconds <= 40:
             raise ValueError("Invalid evidence burst or sampling time budget")
         if any(not finite(v) or not 0 <= v <= 1 for v in (self.density_weight, self.quality_weight,
@@ -78,7 +95,8 @@ class EvidenceOptions:
             raise ValueError("Selection needs a positive weight and novelty scale")
 
     def budget(self):
-        return {"max_model_turns": 1, "max_images": math.ceil(self.selected_frames / 4),
+        return {"max_model_turns": 1, "max_images": (1 + math.ceil(self.detail_regions / 4)
+                if self.detail_regions else math.ceil(self.selected_frames / 4)),
                 "max_source_frames": self.sample_frames, "max_selected_frames": self.selected_frames}
 
 
@@ -172,7 +190,11 @@ def sample_frames(start, end, events, options):
         # Reserve tail observations before anchor bursts or broad samples.
         object_times = [(t, "object_tail") for t in object_tail
                         if i == (min(2, max(0, int((t - start) / duration * 3))) if duration else 0)]
-        times = tail_times + object_times + bursts + broad
+        # In overview/detail mode, establish the whole interval before spending
+        # the remaining extraction time on nearby track bursts.
+        if options.detail_regions and candidate_phase == "early" and broad:
+            broad[0] = (lo + min(1, (hi - lo) / 2), "interval_coverage")
+        times = tail_times + object_times + (broad + bursts if options.detail_regions else bursts + broad)
         # Fill slots when anchors or interval points coincide, staying within the
         # full candidate interval and preserving the source-frame budget.
         times += [(lo + (hi - lo) * (j + 0.5) / max(1, quota * 2), "interval_coverage")
@@ -395,7 +417,7 @@ class FrigateEvidence:
         self.opener = build_opener(NoRedirect)
 
     def get(self, path, limit=2 * 1024 * 1024, timeout=15):
-        headers = {"User-Agent": "video-event-monitor/0.4.0"}
+        headers = {"User-Agent": "video-event-monitor/0.5.0"}
         if self.key:
             headers["Authorization"] = "Bearer " + self.key
         request = Request(self.url + "/" + path, headers=headers)
@@ -561,7 +583,7 @@ class FrigateEvidence:
                         record.update(requested_timestamp=requested,
                                       timestamp_adjustment_seconds=round(timestamp - requested, 6))
                     records.append(record)
-                    retained_bytes += len(record["_jpeg"])
+                    retained_bytes += len(record["_jpeg"]) + len(record.get("_source_jpeg", b""))
                     obtained = True
                     break
                 except (EvidenceUnavailable, UnidentifiedImageError, OSError, Image.DecompressionBombError):
@@ -597,7 +619,8 @@ class FrigateEvidence:
         panel.save(encoded, format="JPEG", quality=self.options.jpeg_quality)
         return {**selection, "timestamp": timestamp, "source_size": original_size, "crop_pixels": box,
                 "panel_size": list(panel.size), "scoring_region": "roi_polygon" if polygon else "crop",
-                **visual_metrics(panel, polygon), "_jpeg": encoded.getvalue()}
+                **visual_metrics(panel, polygon), "_jpeg": encoded.getvalue(),
+                **({"_source_jpeg": raw} if self.options.detail_regions else {})}
 
     def pack(self, candidate, selections, records, missing, attempted, crop, warnings, failed_requests):
         start, end = candidate["started_at"], candidate["ended_at"]
@@ -628,11 +651,18 @@ class FrigateEvidence:
         if exceeded:
             warnings.append("Requested temporal coverage was not met; selected observation gaps exceed "
                             f"{target_gap:g} seconds.")
+        details = self.options.detail_regions and not candidate.get("test")
+        per_page = len(selected) if details else 4
         annotations, images = [], []
-        for offset in range(0, len(selected), 4):
-            page = selected[offset:offset + 4]
-            columns = min(2, len(page))
-            cell_w, cell_h = max(r["panel_size"][0] for r in page), max(r["panel_size"][1] for r in page) + 28
+        for offset in range(0, len(selected), per_page):
+            page = selected[offset:offset + per_page]
+            columns = min(3 if details else 2, len(page))
+            sizes = []
+            for record in page:
+                w, h = record["panel_size"]
+                ratio = min(1, 800 / w) if details else 1
+                sizes.append((max(1, round(w * ratio)), max(1, round(h * ratio))))
+            cell_w, cell_h = max(w for w, h in sizes), max(h for w, h in sizes) + 28
             output = Image.new("RGB", (columns * cell_w, math.ceil(len(page) / columns) * cell_h), "#111111")
             draw = ImageDraw.Draw(output)
             frame_ids = []
@@ -643,9 +673,13 @@ class FrigateEvidence:
                 label = frame_id + " " + record["phase"] + " | " + datetime.fromtimestamp(record["timestamp"], timezone.utc).isoformat(timespec="milliseconds")
                 draw.text((x + 6, y + 5), label, fill="white")
                 with Image.open(BytesIO(record["_jpeg"])) as panel:
+                    if panel.size != sizes[j]:
+                        panel = panel.resize(sizes[j], Image.Resampling.LANCZOS)
                     output.paste(panel, (x, y + 28))
                 annotations.append({**{k: v for k, v in record.items() if not k.startswith("_")},
-                                    "frame_id": frame_id, "page": len(images) + 1, "row": j // columns, "column": j % columns})
+                                    "frame_id": frame_id, "page": len(images) + 1, "row": j // columns, "column": j % columns,
+                                    **({"overview_size": list(sizes[j]), "overview_pixels":
+                                        [x, y + 28, x + sizes[j][0], y + 28 + sizes[j][1]]} if details else {})})
             data = BytesIO()
             output.save(data, format="JPEG", quality=self.options.jpeg_quality)
             if data.tell() > 2 * 1024 * 1024:
@@ -655,7 +689,7 @@ class FrigateEvidence:
         budget = ({"max_model_turns": 1, "max_images": 1, "max_source_frames": 1, "max_selected_frames": 1}
                   if candidate.get("test") else self.options.budget())
         identity = candidate["candidate_id"]
-        return {"candidate_id": identity, "subject": self.camera,
+        public = {"candidate_id": identity, "subject": self.camera,
                 **{name: identity if path == "candidate_id" else self.camera
                    for name, path in self.aliases.items() if path in {"candidate_id", "subject"}},
                 "images": images, "frame_timestamps": [r["timestamp"] for r in selected], "missing_timestamps": missing,
@@ -690,3 +724,97 @@ class FrigateEvidence:
                 "cautions": ["Activity phases do not establish a real-world outcome.",
                              "Track counts, quality and visual novelty are heuristics, not semantic recognition.",
                              *self.cautions]}
+        if not details:
+            return public
+        public["region_views"] = {
+            "method": "POST", "endpoint": "same evidence service and path as this GET",
+            "coordinate_space": "frame_crop_normalized_xyxy", "max_regions": self.options.detail_regions,
+            "max_images": math.ceil(self.options.detail_regions / 4), "batch_limit": 1,
+            "request_example": {"regions": [{"frame_id": "F01", "box": [0.2, 0.3, 0.4, 0.5]}]},
+            "instructions": "Locate visible objects in the overview, then submit one batch of tight regions. "
+                            "Box coordinates are fractions of that frame's image content, excluding its label "
+                            "and other cells. Crops use retained original-resolution pixels, not enlarged "
+                            "overview pixels. All overview and detail pages share evidence_budget.max_images. "
+                            "Keep frame IDs/times; regions are observations, not distinct object identities. "
+                            "If the cached session expires, report pending; do not resample.",
+        }
+        sources = {f"F{i + 1:02d}": (record["_source_jpeg"], annotations[i])
+                   for i, record in enumerate(selected) if "_source_jpeg" in record}
+        return EvidencePack(public, sources)
+
+    def regions(self, pack, request):
+        """One idempotent local crop batch; no new source requests or model calls."""
+        if not isinstance(pack, EvidencePack) or not pack.get("region_views") or pack.get("test"):
+            raise EvidenceUnavailable("detail_views_disabled")
+        if not isinstance(request, dict) or set(request) != {"regions"}:
+            raise ValueError("invalid_detail_request")
+        regions = request["regions"]
+        if not isinstance(regions, list) or not 1 <= len(regions) <= pack["region_views"]["max_regions"]:
+            raise ValueError("invalid_detail_regions")
+        validated, seen = [], set()
+        for region in regions:
+            if not isinstance(region, dict) or set(region) != {"frame_id", "box"}:
+                raise ValueError("invalid_detail_region")
+            identity, box = region["frame_id"], region["box"]
+            if not isinstance(identity, str) or identity not in pack.sources:
+                raise ValueError("invalid_detail_frame")
+            if (not isinstance(box, list) or len(box) != 4 or any(not finite(v) or not 0 <= v <= 1 for v in box)
+                    or not box[0] < box[2] or not box[1] < box[3]
+                    or (box[2] - box[0]) * (box[3] - box[1]) > 0.35):
+                raise ValueError("invalid_detail_box")
+            key = (identity, *box)
+            if key in seen:
+                raise ValueError("duplicate_detail_region")
+            seen.add(key)
+            raw, frame = pack.sources[identity]
+            bounds = frame["crop_pixels"] or [0, 0, *frame["source_size"]]
+            w, h = bounds[2] - bounds[0], bounds[3] - bounds[1]
+            pixels = [bounds[0] + math.floor(box[0] * w), bounds[1] + math.floor(box[1] * h),
+                      bounds[0] + math.ceil(box[2] * w), bounds[1] + math.ceil(box[3] * h)]
+            if pixels[2] - pixels[0] < 8 or pixels[3] - pixels[1] < 8:
+                raise ValueError("detail_region_too_small")
+            validated.append((region, raw, frame, pixels))
+        canonical = json.dumps(request, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if pack.detail_request is not None:
+            if canonical != pack.detail_request:
+                raise EvidenceUnavailable("detail_batch_already_committed")
+            return pack.detail_response
+        panels, annotations = [], []
+        for i, (region, raw, frame, pixels) in enumerate(validated):
+            with Image.open(BytesIO(raw)) as source:
+                panel = source.convert("RGB").crop(pixels)
+            native_size = list(panel.size)
+            panel.thumbnail((self.options.max_width, self.options.max_height), Image.Resampling.LANCZOS)
+            annotations.append({"region_id": f"R{i + 1:02d}", "frame_id": region["frame_id"],
+                                "timestamp": frame["timestamp"], "box": region["box"],
+                                "source_size": frame["source_size"], "source_crop_pixels": pixels,
+                                "native_crop_size": native_size, "panel_size": list(panel.size)})
+            panels.append(panel)
+        images = []
+        for offset in range(0, len(panels), 4):
+            batch = panels[offset:offset + 4]
+            columns = min(2, len(batch))
+            width, height = max(p.width for p in batch), max(p.height for p in batch) + 28
+            output = Image.new("RGB", (columns * width, math.ceil(len(batch) / columns) * height), "#111111")
+            draw = ImageDraw.Draw(output)
+            for j, panel in enumerate(batch):
+                row = annotations[offset + j]
+                x, y = (j % columns) * width, (j // columns) * height
+                draw.text((x + 6, y + 5), row["region_id"] + " " + row["frame_id"] + " | " +
+                          datetime.fromtimestamp(row["timestamp"], timezone.utc).isoformat(timespec="milliseconds"), fill="white")
+                output.paste(panel, (x, y + 28))
+                row.update(page=len(images) + 2, row=j // columns, column=j % columns)
+            encoded = BytesIO()
+            output.save(encoded, format="JPEG", quality=self.options.jpeg_quality)
+            if encoded.tell() > 2 * 1024 * 1024:
+                raise EvidenceUnavailable("composite_size_limit")
+            images.append({"page": len(images) + 2, "region_ids": [r["region_id"] for r in annotations[offset:offset + 4]],
+                           "size": list(output.size), "mime_type": "image/jpeg",
+                           "image_base64": base64.b64encode(encoded.getvalue()).decode()})
+        response = {"candidate_id": pack["candidate_id"], "subject": pack["subject"],
+                    "evidence_version": pack["evidence_version"], "images": images, "regions": annotations,
+                    "evidence_budget": pack["evidence_budget"], "source_requests": 0,
+                    "cautions": ["Original pixels cannot reveal occluded content or restore source compression.",
+                                 "Regions from different frames can show the same object; a crop is not an object count."]}
+        pack.detail_request, pack.detail_response = canonical, response
+        return response

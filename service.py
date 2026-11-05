@@ -402,7 +402,7 @@ class State:
                             else self.config.evidence_options.budget()), "evidence": {
                 "service": self.config.evidence_service, "path": prefix + "evidence/" + candidate_id,
                 "result_path": prefix + "results/" + candidate_id,
-                "instructions": "Fetch this bounded evidence JSON through NyxID into a private file; decode images[].image_base64 locally and view each page once within evidence_budget. Never print base64. A 202 pending response or interrupted download may be retried at most 6 times after 5 seconds; cached retrieval does not resample. Frames have IDs and actual timestamps. Read all cautions; quality/novelty/track counts are heuristics, not semantic conclusions. Never call raw source media or live images. Follow the configured downstream workflow, deduplicate by candidate_id, independently verify side effects and then POST the configured result fields to result_path. integration_test is synthetic; unavailable evidence means pending."}}
+                "instructions": "Fetch this bounded evidence JSON through NyxID into a private file; decode images[].image_base64 locally and view each page once within evidence_budget. Never print base64. A 202 pending response or interrupted download may be retried at most 6 times after 5 seconds; cached retrieval does not resample. If region_views is advertised, GET the overview first, then POST one batch of frame_id/normalized-box regions to this same service/path for native detail pages. The overview and detail pages share the total image budget; never resample after session expiry. Frames have IDs and actual timestamps. Read all cautions; quality/novelty/track counts are heuristics, not semantic conclusions. Never call raw source media or live images. Follow the configured downstream workflow, deduplicate by candidate_id, independently verify side effects and then POST the configured result fields to result_path. integration_test is synthetic; unavailable evidence means pending."}}
         if self.config.evidence_service and self.config.evidence_token:
             event["data"] = {**event["data"], "result_callback": {"service": self.config.evidence_service,
                 "path": prefix + "results/" + candidate_id, "statuses": self.pipeline.spec["output"]["result_statuses"],
@@ -446,7 +446,7 @@ class State:
                 method="POST",
                 headers={
                     "Content-Type": "application/cloudevents+json",
-                    "User-Agent": "video-event-monitor/0.4.0",
+                    "User-Agent": "video-event-monitor/0.5.0",
                     "webhook-id": webhook_id,
                     "webhook-timestamp": timestamp,
                     "webhook-signature": cma_signature(self.config.cma_hmac_secret, webhook_id, timestamp, row["body"]),
@@ -561,7 +561,7 @@ def create_app(config=None):
                 pass
             app.state.monitor.close()
 
-    app = FastAPI(title="Video Event Monitor", version="0.4.0", lifespan=lifespan,
+    app = FastAPI(title="Video Event Monitor", version="0.5.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
 
     @app.exception_handler(Problem)
@@ -619,7 +619,7 @@ def create_app(config=None):
 
     @app.get("/healthz")
     def health():
-        return {"status": "ok", "version": "0.4.0", "worker_name": app.state.worker.config.worker_name,
+        return {"status": "ok", "version": "0.5.0", "worker_name": app.state.worker.config.worker_name,
                 "model_calls": 0}
 
     @app.post("/ingest")
@@ -669,6 +669,36 @@ def create_app(config=None):
                     monitor.media_cache.pop(next(iter(monitor.media_cache)))
                 monitor.media_cache[key] = result
             return result
+        finally:
+            with monitor.media_lock:
+                monitor.media_busy = False
+
+    @app.post("/rules/{rule_id}/revisions/{revision:int}/evidence/{candidate_id}")
+    @app.post("/evidence/{candidate_id}")
+    async def evidence_regions(candidate_id: str, request: Request):
+        state = evidence_authorize(request)
+        if state.evidence is None:
+            raise Problem(503, "evidence_disabled")
+        with state.lock:
+            state.candidate(candidate_id)
+        value = await body(request)
+        monitor = request.app.state.monitor
+        key = (state.config.rule_id or "default", state.config.rule_revision or 1, candidate_id)
+        with monitor.media_lock:
+            pack = monitor.media_cache.get(key)
+            if pack is None:
+                raise Problem(410, "evidence_session_expired")
+            if monitor.media_busy:
+                return JSONResponse({"status": "pending", "candidate_id": candidate_id}, status_code=202,
+                                    headers={"Retry-After": "5"})
+            monitor.media_busy = True
+        try:
+            try:
+                return await asyncio.to_thread(state.evidence.regions, pack, value)
+            except ValueError:
+                raise Problem(400, "invalid_detail_request") from None
+            except EvidenceUnavailable as exc:
+                raise Problem(409, str(exc)) from None
         finally:
             with monitor.media_lock:
                 monitor.media_busy = False
