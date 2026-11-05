@@ -122,3 +122,28 @@ headers and column B, locate exactly one matching row, read all ten cells and
 require status=recorded. Then send the same notification as above with the exact
 verified range (and manual_backfill=true if supplied). Use the same stable
 event_id as normal completion so replay cannot cause a second summary.
+
+## Overview and native region views
+
+When the evidence JSON advertises region_views, it is a two-step view of the
+same selected historical frames. First decode/view its single overview page.
+Locate visible plates, bowls and their contents in that overview. Request one
+batch of up to region_views.max_regions tight crops by POSTing
+{"regions":[{"frame_id":"F03","box":[0.2,0.3,0.4,0.5]}]} to the exact same
+evidence service/path. Coordinates are normalized [left,top,right,bottom]
+within that frame's image content, excluding its timestamp label, padding and
+other overview cells. Use frames[].overview_pixels to locate each cell.
+Choose the clearest unoccluded views with food visible; include vessel rims to
+retain context. Compare across earlier/later views only when useful. A repeated
+view/crop of the same dish is not another dish. Do not crop people or unrelated
+background, or invent boxes for hidden objects.
+The service crops retained original-resolution pixels; do not enlarge an
+overview image as a substitute. Decode/view each returned detail page once.
+One overview plus up to two detail pages together share max_images=3 and the
+same model turn. Submit all needed regions in one batch; only an identical retry
+is allowed. No new source frames are fetched. If the session expired, return
+pending rather than resampling. If no food/tableware is visible, skip the detail
+request and state the limitation. Cite both the region_id and original frame ID
+and actual time for detail observations. Keep the ten-column Sheet schema and
+normal idempotent readback workflow. Crops cannot reveal hidden contents, infer
+consumption, or prove the final meal boundary.

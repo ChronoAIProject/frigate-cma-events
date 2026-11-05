@@ -1,6 +1,6 @@
 [project]
 name = "video-event-monitor"
-version = "0.4.0"
+version = "0.5.0"
 description = "Configurable event windows, bounded evidence, and durable CMA delivery"
 requires-python = ">=3.12"
 dependencies = [

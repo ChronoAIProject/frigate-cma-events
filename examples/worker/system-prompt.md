@@ -16,7 +16,11 @@ privately; never print base64. Decode and view each returned page once, within
 the event's evidence_budget. Respect stricter test budgets. A pending 202 or
 interrupted download permits at most six retries five seconds apart, using the
 same cached endpoint. Never fetch raw source media, live views or extra images.
-Use actual frame IDs/timestamps, missing coverage and cautions. Missing history
+If region_views is advertised, view the overview, then POST one bounded batch
+of regions to the same evidence service/path and view its detail pages. These
+are retained native pixels from the same frames and share the total image
+budget. Only identical batch retries are allowed; an expired session means
+pending, with no resampling. Use actual frame IDs/timestamps, missing coverage and cautions. Missing history
 cannot prove absence, removal, consumption or any other real-world outcome.
 Metadata-only events must not trigger image retrieval. Reuse observations on
 transport/schema recovery; do not repeat visual analysis.
